@@ -1,34 +1,31 @@
 // Find all our documentation at https://docs.near.org
+pub mod internal;
+pub mod views;
+pub mod events;
+pub mod admin;
+pub mod models;
 use near_sdk::{log, near};
 
 // Define the contract structure
 #[near(contract_state)]
-pub struct Contract {
-    greeting: String,
+pub struct ShedaContract {
+    
 }
 
 // Define the default, which automatically initializes the contract
-impl Default for Contract {
+impl Default for ShedaContract {
     fn default() -> Self {
         Self {
-            greeting: "Hello".to_string(),
+            
         }
     }
 }
 
 // Implement the contract structure
 #[near]
-impl Contract {
+impl ShedaContract {
     // Public method - returns the greeting saved, defaulting to DEFAULT_GREETING
-    pub fn get_greeting(&self) -> String {
-        self.greeting.clone()
-    }
-
-    // Public method - accepts a greeting, such as "howdy", and records it
-    pub fn set_greeting(&mut self, greeting: String) {
-        log!("Saving greeting: {greeting}");
-        self.greeting = greeting;
-    }
+    
 }
 
 /*
@@ -41,15 +38,11 @@ mod tests {
 
     #[test]
     fn get_default_greeting() {
-        let contract = Contract::default();
-        // this test did not call set_greeting so should return the default "Hello" greeting
-        assert_eq!(contract.get_greeting(), "Hello");
+        todo!()
     }
 
     #[test]
     fn set_then_get_greeting() {
-        let mut contract = Contract::default();
-        contract.set_greeting("howdy".to_string());
-        assert_eq!(contract.get_greeting(), "howdy");
+        todo!()
     }
 }

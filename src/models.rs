@@ -7,7 +7,9 @@ pub enum DisputeStatus {
     Resolved,
 }
 
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize)]
 pub struct Property{
+    pub id :u64,
     pub owner_id: AccountId,
     pub description: String,
     pub metadata_uri:String,
@@ -18,13 +20,18 @@ pub struct Property{
     pub active_lease:Option<Lease>,
 }
 
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize)]
 pub struct Bid{
+    pub id: u64,
     pub bidder_id: AccountId,
+    pub property_id: u64,
     pub bid_amount: u128,
     pub created_at:Timestamp,
 }
 
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize)]
 pub struct Lease{
+    pub id:u64,
     pub property_id:u64,
     pub tenant_id:AccountId,
     pub start_time:Timestamp,
@@ -35,3 +42,13 @@ pub struct Lease{
 
 }
 
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize,PartialEq, Debug)]
+pub enum ContractError {
+    PropertyNotFound,
+    NotPropertyOwner,
+    InvalidBidAmount,
+    LeaseNotActive,
+    UnauthorizedAccess,
+    DisputeAlreadyRaised,
+    // Add more error variants as needed
+}

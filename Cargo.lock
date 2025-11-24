@@ -1603,6 +1603,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "near"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e68f4a476b8270a921340cb53b460126f8541929b3f15e63c36437c1acd1e2b"
+
+[[package]]
 name = "near-abi"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2914,6 +2920,7 @@ name = "sheda_contract"
 version = "0.1.0"
 dependencies = [
  "borsh",
+ "near",
  "near-sdk",
  "near-workspaces",
  "serde",

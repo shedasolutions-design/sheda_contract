@@ -4,19 +4,47 @@ pub mod views;
 pub mod events;
 pub mod admin;
 pub mod models;
-use near_sdk::{log, near};
+use near_sdk::{AccountId,env, log, near, store::{IterableMap, IterableSet}};
+#[allow(unused_imports)]
+use crate::models::{Property, Bid, Lease, DisputeStatus, ContractError};
+#[allow(unused_imports)]
 
 // Define the contract structure
 #[near(contract_state)]
 pub struct ShedaContract {
-    
+    pub properties:IterableMap<u64, Property>,
+    pub bids:IterableMap<u64, Vec<Bid>>, //property_id to list of bids
+    pub leases:IterableMap<u64, Lease>,
+
+    //tracking
+    pub property_counter:u64,
+    pub bid_counter:u64,
+    pub lease_counter:u64,
+    pub property_per_owner:IterableMap<AccountId, Vec<u64>>, //owner to list of property ids
+    pub lease_per_tenant:IterableMap<AccountId, Vec<u64>>, //tenant to list of lease ids
+    //admins
+    pub admins:IterableSet<AccountId>,
+    pub owner_id:AccountId,
+    pub treasury_account_id:AccountId,
+
+
 }
 
 // Define the default, which automatically initializes the contract
 impl Default for ShedaContract {
     fn default() -> Self {
         Self {
-            
+            properties: IterableMap::new(b"p".to_vec()),
+            bids: IterableMap::new(b"b".to_vec()),
+            leases: IterableMap::new(b"l".to_vec()),
+            property_counter:0,
+            bid_counter:0,
+            lease_counter:0,
+            property_per_owner: IterableMap::new(b"o".to_vec()),
+            lease_per_tenant: IterableMap::new(b"t".to_vec()),
+            admins: IterableSet::new(b"a".to_vec()),
+            owner_id:"penivera.testnet".parse().unwrap(),
+            treasury_account_id:"penivera.testnet".parse().unwrap(),
         }
     }
 }
@@ -24,7 +52,25 @@ impl Default for ShedaContract {
 // Implement the contract structure
 #[near]
 impl ShedaContract {
-    // Public method - returns the greeting saved, defaulting to DEFAULT_GREETING
+    #[init]
+    pub fn new(treasury_account_id: AccountId) -> Self {
+        let owner_id = env::signer_account_id();
+        Self {
+            properties: IterableMap::new(b"p".to_vec()),
+            bids: IterableMap::new(b"b".to_vec()),
+            leases: IterableMap::new(b"l".to_vec()),
+            property_counter:0,
+            bid_counter:0,
+            lease_counter:0,
+            property_per_owner: IterableMap::new(b"o".to_vec()),
+            lease_per_tenant: IterableMap::new(b"t".to_vec()),
+            admins: IterableSet::new(b"a".to_vec()),
+            owner_id,
+            treasury_account_id,
+        }
+    }
+
+    
     
 }
 
@@ -34,6 +80,7 @@ impl ShedaContract {
  */
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]

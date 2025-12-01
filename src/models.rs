@@ -1,31 +1,31 @@
 use near_sdk::{
-    borsh::{BorshDeserialize, BorshSerialize},
-    near,
+    borsh::{self, BorshDeserialize, BorshSerialize},
     serde::{Deserialize, Serialize},
     AccountId, Timestamp,
 };
 
-#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, PartialEq, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, PartialEq, Debug, Clone)]
 pub enum DisputeStatus {
     None,
     Raised,
     Resolved,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize)]
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
 pub struct Property {
     pub id: u64,
     pub owner_id: AccountId,
     pub description: String,
     pub metadata_uri: String,
     pub is_for_sale: bool,
-    pub price: u128,
-    pub lease_duration_nanos: u64, //0 if for sale
-    pub damage_escrow: u128,       //amount held in escrow for damages
+    // Price in Stablecoin Atomic Units (e.g., 6 decimals for USDC)
+    pub price: u128, 
+    pub lease_duration_nanos: Option<u64>, //None if not for lease
+    pub damage_escrow: u128,       // Amount held for damages
     pub active_lease: Option<Lease>,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize)]
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize,Clone)]
 pub struct Bid {
     pub id: u64,
     pub bidder_id: AccountId,
@@ -34,7 +34,7 @@ pub struct Bid {
     pub created_at: Timestamp,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize)]
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
 pub struct Lease {
     pub id: u64,
     pub property_id: u64,
@@ -46,7 +46,8 @@ pub struct Lease {
     pub escrow_held: u128,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, PartialEq, Debug)]
+// Kept your error handling, it is clean.
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, PartialEq, Debug, Clone)]
 pub enum ContractError {
     PropertyNotFound,
     NotPropertyOwner,
@@ -54,5 +55,39 @@ pub enum ContractError {
     LeaseNotActive,
     UnauthorizedAccess,
     DisputeAlreadyRaised,
-    // Add more error variants as needed
+    LeaseNotFound,
+    // Added for Stablecoin logic
+    InvalidPaymentToken,
+}
+
+impl std::fmt::Display for ContractError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContractError::PropertyNotFound => write!(f, "Property not found"),
+            ContractError::NotPropertyOwner => write!(f, "Not property owner"),
+            ContractError::InvalidBidAmount => write!(f, "Invalid bid amount"),
+            ContractError::LeaseNotActive => write!(f, "Lease not active"),
+            ContractError::UnauthorizedAccess => write!(f, "Unauthorized access"),
+            ContractError::DisputeAlreadyRaised => write!(f, "Dispute already raised"),
+            ContractError::LeaseNotFound => write!(f, "Lease not found"),
+            ContractError::InvalidPaymentToken => write!(f, "Invalid payment token"),
+        }
+    }
+}
+
+impl std::error::Error for ContractError {}
+
+impl AsRef<str> for ContractError {
+    fn as_ref(&self) -> &str {
+        match self {
+            ContractError::PropertyNotFound => "PropertyNotFound",
+            ContractError::NotPropertyOwner => "NotPropertyOwner",
+            ContractError::InvalidBidAmount => "InvalidBidAmount",
+            ContractError::LeaseNotActive => "LeaseNotActive",
+            ContractError::UnauthorizedAccess => "UnauthorizedAccess",
+            ContractError::DisputeAlreadyRaised => "DisputeAlreadyRaised",
+            ContractError::LeaseNotFound => "LeaseNotFound",
+            ContractError::InvalidPaymentToken => "InvalidPaymentToken",
+        }
+    }
 }

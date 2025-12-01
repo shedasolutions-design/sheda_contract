@@ -7,7 +7,7 @@ pub mod views;
 #[allow(unused_imports)]
 use crate::models::{Bid, ContractError, DisputeStatus, Lease, Property};
 use near_sdk::{
-    env, log, near,
+    env, near,
     store::{IterableMap, IterableSet},
     AccountId,
 };
@@ -28,7 +28,7 @@ pub struct ShedaContract {
     //admins
     pub admins: IterableSet<AccountId>,
     pub owner_id: AccountId,
-    pub treasury_account_id: AccountId,
+    
 }
 
 // Define the default, which automatically initializes the contract
@@ -45,7 +45,6 @@ impl Default for ShedaContract {
             lease_per_tenant: IterableMap::new(b"t".to_vec()),
             admins: IterableSet::new(b"a".to_vec()),
             owner_id: "penivera.testnet".parse().unwrap(),
-            treasury_account_id: "penivera.testnet".parse().unwrap(),
         }
     }
 }
@@ -54,7 +53,7 @@ impl Default for ShedaContract {
 #[near]
 impl ShedaContract {
     #[init]
-    pub fn new(treasury_account_id: AccountId) -> Self {
+    pub fn new() -> Self {
         let owner_id = env::signer_account_id();
         Self {
             properties: IterableMap::new(b"p".to_vec()),
@@ -67,7 +66,6 @@ impl ShedaContract {
             lease_per_tenant: IterableMap::new(b"t".to_vec()),
             admins: IterableSet::new(b"a".to_vec()),
             owner_id,
-            treasury_account_id,
         }
     }
 }
@@ -78,16 +76,5 @@ impl ShedaContract {
  */
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
-    use super::*;
-
-    #[test]
-    fn get_default_greeting() {
-        todo!()
-    }
-
-    #[test]
-    fn set_then_get_greeting() {
-        todo!()
-    }
+    
 }

@@ -45,7 +45,7 @@ impl ShedaContract {
         let mut result = Vec::new();
         let mut count = 0;
         
-        for (key, value) in self.properties.iter().skip(from_index as usize) {
+        for (_key, value) in self.properties.iter().skip(from_index as usize) {
             if count >= limit {
                 break;
             }
@@ -55,10 +55,18 @@ impl ShedaContract {
         result
     }
 
+    pub fn get_property_by_owner(&self, owner_id: AccountId) -> Vec<crate::models::Property> {
+        let property_ids = self.property_per_owner.get(&owner_id);
+        let mut properties = Vec::new();
+        if let Some(ids) = property_ids {
+            for id in ids {
+                if let Some(property) = self.properties.get(&id) {
+                    properties.push(property.clone());
+                }
+            }
+        }
+        properties
+    }
 
-
-
-
-    
 
 }

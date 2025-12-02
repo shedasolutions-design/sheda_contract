@@ -4,16 +4,19 @@ use near_sdk::{
     AccountId, Timestamp,
 };
 
-#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, PartialEq, Debug, Clone)]
+use schemars::JsonSchema;
+
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, PartialEq, Debug, Clone,JsonSchema)]
 pub enum DisputeStatus {
     None,
     Raised,
     Resolved,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone,JsonSchema)]
 pub struct Property {
     pub id: u64,
+    #[schemars(skip)]
     pub owner_id: AccountId,
     pub description: String,
     pub metadata_uri: String,
@@ -34,10 +37,11 @@ pub struct Bid {
     pub created_at: Timestamp,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone,JsonSchema)]
 pub struct Lease {
     pub id: u64,
     pub property_id: u64,
+    #[schemars(skip)]
     pub tenant_id: AccountId,
     pub start_time: Timestamp,
     pub end_time: Timestamp,

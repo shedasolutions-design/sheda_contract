@@ -89,7 +89,7 @@ impl ShedaContract {
 
         let contract_balance = env::account_balance();
         
-        Promise::new(to_account.clone()).transfer(contract_balance);
+        let _ = Promise::new(to_account.clone()).transfer(contract_balance);
         log!(
             "Emergency withdrawal of {} yoctoNEAR to {} by owner {}",
             contract_balance.as_yoctonear(),

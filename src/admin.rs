@@ -1,7 +1,7 @@
 use crate::models::*;
-use crate::{models::ContractError, ShedaContract,ShedaContractExt};
-use near_sdk::{AccountId, Promise, env, log,near_bindgen};
-
+use crate::views::LeaseView;
+use crate::{models::ContractError, ShedaContract, ShedaContractExt};
+use near_sdk::{env, log, near_bindgen, AccountId, Promise};
 
 #[near_bindgen]
 impl ShedaContract {
@@ -30,7 +30,7 @@ impl ShedaContract {
         self.admins.contains(&account_id)
     }
 
-    pub fn get_admins(&self)-> Vec<AccountId> {
+    pub fn get_admins(&self) -> Vec<AccountId> {
         assert!(
             self.is_admin(env::signer_account_id()),
             "UnauthorizedAccess"
@@ -67,7 +67,7 @@ impl ShedaContract {
         Ok(())
     }
 
-    pub fn get_leases_with_disputes(&self) -> Vec<Lease> {
+    pub fn get_leases_with_disputes(&self) -> Vec<LeaseView> {
         assert!(
             self.is_admin(env::signer_account_id()),
             "UnauthorizedAccess"
@@ -76,7 +76,7 @@ impl ShedaContract {
         self.leases
             .values()
             .filter(|lease| lease.dispute_status == DisputeStatus::Raised)
-            .cloned()
+            .map(|lease| lease.into())
             .collect()
     }
 
@@ -88,7 +88,7 @@ impl ShedaContract {
         );
 
         let contract_balance = env::account_balance();
-        
+
         let _ = Promise::new(to_account.clone()).transfer(contract_balance);
         log!(
             "Emergency withdrawal of {} yoctoNEAR to {} by owner {}",

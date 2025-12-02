@@ -6,14 +6,16 @@ use near_sdk::{
 
 use schemars::JsonSchema;
 
-#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, PartialEq, Debug, Clone,JsonSchema)]
+#[derive(
+    BorshDeserialize, BorshSerialize, Deserialize, Serialize, PartialEq, Debug, Clone, JsonSchema,
+)]
 pub enum DisputeStatus {
     None,
     Raised,
     Resolved,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone,JsonSchema)]
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone, JsonSchema)]
 pub struct Property {
     pub id: u64,
     #[schemars(skip)]
@@ -22,13 +24,13 @@ pub struct Property {
     pub metadata_uri: String,
     pub is_for_sale: bool,
     // Price in Stablecoin Atomic Units (e.g., 6 decimals for USDC)
-    pub price: u128, 
+    pub price: u128,
     pub lease_duration_nanos: Option<u64>, //None if not for lease
-    pub damage_escrow: u128,       // Amount held for damages
+    pub damage_escrow: u128,               // Amount held for damages
     pub active_lease: Option<Lease>,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize,Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
 pub struct Bid {
     pub id: u64,
     pub bidder_id: AccountId,
@@ -37,7 +39,7 @@ pub struct Bid {
     pub created_at: Timestamp,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone,JsonSchema)]
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone, JsonSchema)]
 pub struct Lease {
     pub id: u64,
     pub property_id: u64,
@@ -92,6 +94,72 @@ impl AsRef<str> for ContractError {
             ContractError::DisputeAlreadyRaised => "DisputeAlreadyRaised",
             ContractError::LeaseNotFound => "LeaseNotFound",
             ContractError::InvalidPaymentToken => "InvalidPaymentToken",
+        }
+    }
+}
+
+//SECTION -  View structs
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PropertyView {
+    pub id: u64,
+    pub owner_id: String,
+    pub description: String,
+    pub metadata_uri: String,
+    pub is_for_sale: bool,
+    pub price: u128,
+    pub lease_duration_nanos: Option<u64>,
+    pub damage_escrow: u128,
+    pub active_lease: Option<LeaseView>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct LeaseView {
+    pub id: u64,
+    pub property_id: u64,
+    pub tenant_id: String,
+    pub start_time: Timestamp,
+    pub end_time: Timestamp,
+    pub active: bool,
+    pub dispute_status: DisputeStatus,
+    pub escrow_held: u128,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct BidView {
+    pub id: u64,
+    pub bidder_id: String,
+    pub property_id: u64,
+    pub bid_amount: u128,
+    pub created_at: Timestamp,
+}
+
+impl Property {
+    pub fn to_view(&self) -> PropertyView {
+        PropertyView {
+            id: self.id,
+            owner_id: self.owner_id.to_string(),
+            description: self.description.clone(),
+            metadata_uri: self.metadata_uri.clone(),
+            is_for_sale: self.is_for_sale,
+            price: self.price,
+            lease_duration_nanos: self.lease_duration_nanos,
+            damage_escrow: self.damage_escrow,
+            active_lease: self.active_lease.as_ref().map(|l| l.to_view()),
+        }
+    }
+}
+
+impl Lease {
+    pub fn to_view(&self) -> LeaseView {
+        LeaseView {
+            id: self.id,
+            property_id: self.property_id,
+            tenant_id: self.tenant_id.to_string(),
+            start_time: self.start_time,
+            end_time: self.end_time,
+            active: self.active,
+            dispute_status: self.dispute_status.clone(),
+            escrow_held: self.escrow_held,
         }
     }
 }

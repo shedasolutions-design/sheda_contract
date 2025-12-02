@@ -4,17 +4,20 @@ pub mod events;
 pub mod internal;
 pub mod models;
 pub mod views;
+use crate::internal::*;
 #[allow(unused_imports)]
 use crate::models::{Bid, ContractError, DisputeStatus, Lease, Property};
-use near_sdk::{
-    AccountId, collections::LazyOption, env, near, store::{IterableMap, IterableSet}
-};
 #[allow(unused_imports)]
 use near_contract_standards::non_fungible_token::{
     metadata::{NFTContractMetadata, TokenMetadata},
     NonFungibleToken,
 };
-use crate::internal::*;
+use near_sdk::{
+    collections::LazyOption,
+    env, near,
+    store::{IterableMap, IterableSet},
+    AccountId,
+};
 // Define the contract structure
 #[near(contract_state)]
 pub struct ShedaContract {
@@ -30,11 +33,10 @@ pub struct ShedaContract {
     pub lease_counter: u64,
     pub property_per_owner: IterableMap<AccountId, Vec<u64>>, //owner to list of property ids
 
-    pub lease_per_tenant: IterableMap<AccountId, Vec<u64>>,   //tenant to list of lease ids
+    pub lease_per_tenant: IterableMap<AccountId, Vec<u64>>, //tenant to list of lease ids
     //admins
     pub admins: IterableSet<AccountId>,
     pub owner_id: AccountId,
-    
 }
 trait HasNew {
     fn new(media_url: String) -> Self;
@@ -64,7 +66,6 @@ impl Default for ShedaContract {
                 Some(b"m".to_vec()),
                 Some(b"n".to_vec()),
                 Some(b"o".to_vec()),
-
             ),
             metadata: LazyOption::new(b"m".to_vec(), None),
             properties: IterableMap::new(b"p".to_vec()),
@@ -95,10 +96,7 @@ impl ShedaContract {
                 Some(b"n".to_vec()),
                 Some(b"o".to_vec()),
             ),
-            metadata: LazyOption::new(
-                b"m".to_vec(),
-                Some(&NFTContractMetadata::new(media_url)),
-            ),
+            metadata: LazyOption::new(b"m".to_vec(), Some(&NFTContractMetadata::new(media_url))),
             properties: IterableMap::new(b"p".to_vec()),
             bids: IterableMap::new(b"b".to_vec()),
             leases: IterableMap::new(b"l".to_vec()),
@@ -140,11 +138,8 @@ impl ShedaContract {
 
         // 3. Mint the Standard NFT (Events & Ownership)
         // This handles "property_per_owner" internally via the standard
-        self.token.internal_mint(
-            token_id_str,
-            owner_id.clone(),
-            Some(token_metadata),
-        );
+        self.token
+            .internal_mint(token_id_str, owner_id.clone(), Some(token_metadata));
 
         // 4. Create Your Custom Property Object
         let property = Property {
@@ -165,7 +160,6 @@ impl ShedaContract {
         // 6. Return the ID for the frontend
         property_id
     }
-
 }
 
 /*
@@ -173,6 +167,4 @@ impl ShedaContract {
  * Learn more about Rust tests: https://doc.rust-lang.org/book/ch11-01-writing-tests.html
  */
 #[cfg(test)]
-mod tests {
-    
-}
+mod tests {}

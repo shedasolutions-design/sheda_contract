@@ -1,5 +1,5 @@
-use near_sdk::{log, AccountId};
 use near_sdk::serde::{Deserialize, Serialize};
+use near_sdk::{log, AccountId};
 
 /// Event emitted when a property is minted
 #[derive(Serialize, Deserialize)]
@@ -90,5 +90,9 @@ pub struct EmergencyWithdrawalEvent {
 
 /// Helper function to emit events in standardized JSON format
 pub fn emit_event<T: Serialize>(event_type: &str, event: T) {
-    log!("EVENT_JSON:{{\"event_type\":\"{}\",\"data\":{}}}", event_type, near_sdk::serde_json::to_string(&event).unwrap_or_default());
+    log!(
+        "EVENT_JSON:{{\"event_type\":\"{}\",\"data\":{}}}",
+        event_type,
+        near_sdk::serde_json::to_string(&event).unwrap_or_default()
+    );
 }

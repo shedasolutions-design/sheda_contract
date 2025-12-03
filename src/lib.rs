@@ -69,7 +69,7 @@ impl HasNew for NFTContractMetadata {
 }
 
 // Define the default, which automatically initializes the contract
-#[cfg(test)]
+// #[cfg(test)]
 impl Default for ShedaContract {
     fn default() -> Self {
         Self {
@@ -100,31 +100,28 @@ impl Default for ShedaContract {
 // Implement the contract structure
 #[near]
 impl ShedaContract {
+    //set required init parameters here
     #[init]
-    pub fn new(media_url: String) -> Self {
-        let owner_id = env::signer_account_id();
-        Self {
-            token: NonFungibleToken::new(
-                b"t".to_vec(),
-                owner_id.clone(),
-                Some(b"m".to_vec()),
-                Some(b"n".to_vec()),
-                Some(b"o".to_vec()),
-            ),
-            metadata: LazyOption::new(b"m".to_vec(), Some(&NFTContractMetadata::new(media_url))),
-            properties: IterableMap::new(b"p".to_vec()),
-            bids: IterableMap::new(b"b".to_vec()),
-            leases: IterableMap::new(b"l".to_vec()),
-            property_counter: 0,
-            bid_counter: 0,
-            lease_counter: 0,
-            property_per_owner: IterableMap::new(b"o".to_vec()),
-            lease_per_tenant: IterableMap::new(b"t".to_vec()),
-            admins: IterableSet::new(b"a".to_vec()),
-            owner_id: owner_id,
-            accepted_stablecoin: Vec::new(),
-            stable_coin_balances: IterableMap::new(b"s".to_vec()),
-        }
+    pub fn new(
+        media_url: String,
+        supported_stablecoins: Vec<AccountId>,
+    ) -> Self {
+        assert!(!env::state_exists(), "Contract is already initialized");
+
+        // Start from Default
+        let mut this = Self::default();
+
+        // Set NFT metadata
+        this.metadata.set(&NFTContractMetadata::new(media_url));
+
+        // Set accepted stablecoins
+        this.accepted_stablecoin = supported_stablecoins;
+
+        // Set the deployer as owner and initial admin
+        this.owner_id = env::signer_account_id();
+        this.admins.insert(this.owner_id.clone());
+
+        this
     }
 
     #[payable]
@@ -170,6 +167,7 @@ impl ShedaContract {
             damage_escrow: 0, // Starts at 0 until leased
             active_lease: None,
             timestamp: env::block_timestamp(),
+            sold: None,
         };
 
         // 5. Save Custom Data

@@ -129,7 +129,7 @@ impl ShedaContract {
         }
     }
     
-    
+
     
     pub fn remove_supported_stablecoin(&mut self, token_account: AccountId) {
         assert_eq!(
@@ -149,5 +149,98 @@ impl ShedaContract {
                 env::signer_account_id()
             );
         }
+    }
+
+    pub fn withdraw_stablecoin(&mut self, token_account: AccountId, amount: u128) {
+        assert_eq!(
+            env::signer_account_id(),
+            self.owner_id,
+            "Only owner can withdraw stablecoins"
+        );
+        let balance = *self.stable_coin_balances.get(&token_account).unwrap_or(&0);
+        assert!(balance >= amount, "Insufficient balance for withdrawal");
+        //cross contract call to transfer stablecoin to owner
+        #[allow(unused_must_use)]
+        ft_contract::ext(token_account.clone())
+            .with_attached_deposit(NearToken::from_yoctonear(1))
+            .with_static_gas(Gas::from_tgas(30))
+            .ft_transfer(env::signer_account_id(), U128(amount));
+        //update balance after withdrawal
+        self.stable_coin_balances
+            .insert(token_account.clone(), balance - amount);
+        log!(
+            "Withdrawal of {} {} by owner {}",
+            amount,
+            token_account,
+            env::signer_account_id()
+        );
+    }
+
+    pub fn refund_bids(&mut self, property_id: u64) {
+        assert!(
+            self.is_admin(env::signer_account_id()),
+            "UnauthorizedAccess"
+        );
+        let bids = self.bids.remove(&property_id).unwrap_or_default();
+        for bid in bids.iter() {
+            let bidder = bid.bidder.clone();
+            let amount = bid.amount;
+            //cross contract call to transfer stablecoin back to bidder
+            #[allow(unused_must_use)]
+            ft_contract::ext(env::signer_account_id())
+                .with_attached_deposit(NearToken::from_yoctonear(1))
+                .with_static_gas(Gas::from_tgas(30))
+                .ft_transfer(bidder.clone(), U128(amount));
+            //update stablecoin balance
+            let current_balance = self
+                .stable_coin_balances
+                .remove(&env::signer_account_id())
+                .unwrap_or(0);
+            self.stable_coin_balances
+                .insert(env::signer_account_id(), current_balance - amount);
+            log!(
+                "Refunded {} to bidder {} for property {} by admin {}",
+                amount,
+                bidder,
+                property_id,
+                env::signer_account_id()
+            );
+        }
+    }
+
+    pub fn delist_property(&mut self, property_id: u64) {
+        assert!(
+            self.is_admin(env::signer_account_id()),
+            "UnauthorizedAccess"
+        );
+        //Check that property is not sold or leased
+        let mut property = self
+            .properties
+            .get(&property_id)
+            .expect("Property not found")
+            .clone();
+        assert!(
+            !property.is_for_sale, "Property is currently for sale"
+        );
+        assert!(
+            property.active_lease.is_none(), "Property is currently leased"
+        );
+
+        assert!(
+            self.bids.get(&property_id).is_none(),
+            "Cannot delist property with active bids"
+        );
+
+        assert!(
+            !property.sold.is_none(),
+            "Cannot delist property that has been sold"
+        );
+        property.is_for_sale = false;
+        self.properties.insert(property_id, property);
+        log!(
+            "Property {} delisted by admin {}",
+            property_id,
+            env::signer_account_id()
+        );
     }
 }

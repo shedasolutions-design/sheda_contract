@@ -15,10 +15,9 @@ pub enum DisputeStatus {
     Resolved,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone, JsonSchema)]
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone,)]
 pub struct Property {
     pub id: u64,
-    #[schemars(skip)]
     pub owner_id: AccountId,
     pub description: String,
     pub metadata_uri: String,
@@ -29,6 +28,17 @@ pub struct Property {
     pub damage_escrow: u128,               // Amount held for damages
     pub active_lease: Option<Lease>,
     pub timestamp: Timestamp,
+    pub sold:Option<Sold>,
+
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
+pub struct Sold{
+    pub property_id: u64,
+    pub buyer_id: AccountId,
+    pub amount: u128,
+    pub previous_owner_id: AccountId,
+    pub sold_at: Timestamp,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
@@ -118,6 +128,7 @@ pub struct PropertyView {
     pub damage_escrow: u128,
     pub active_lease: Option<LeaseView>,
     pub timestamp: Timestamp,
+    pub sold: Option<SoldView>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -154,6 +165,7 @@ impl Property {
             damage_escrow: self.damage_escrow,
             active_lease: self.active_lease.as_ref().map(|l| l.to_view()),
             timestamp: self.timestamp,
+            sold: self.sold.as_ref().map(|s| s.to_view()),  
         }
     }
 }
@@ -169,6 +181,27 @@ impl Lease {
             active: self.active,
             dispute_status: self.dispute_status.clone(),
             escrow_held: self.escrow_held,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SoldView {
+    pub property_id: u64,
+    pub buyer_id: String,
+    pub amount: u128,
+    pub previous_owner_id: String,
+    pub sold_at: Timestamp,
+}
+
+impl Sold{
+    pub fn to_view(&self) -> SoldView {
+        SoldView {
+            property_id: self.property_id,
+            buyer_id: self.buyer_id.to_string(),
+            amount: self.amount,
+            previous_owner_id: self.previous_owner_id.to_string(),
+            sold_at: self.sold_at,
         }
     }
 }

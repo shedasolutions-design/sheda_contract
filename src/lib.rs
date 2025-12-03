@@ -48,6 +48,7 @@ pub struct ShedaContract {
 
     //accepted stablecoin info could go here
     pub accepted_stablecoin: Vec<AccountId>,
+    pub stable_coin_balances: IterableMap<AccountId, u128>,
 }
 trait HasNew {
     fn new(media_url: String) -> Self;
@@ -91,6 +92,7 @@ impl Default for ShedaContract {
             admins: IterableSet::new(b"a".to_vec()),
             owner_id: env::signer_account_id(),
             accepted_stablecoin: Vec::new(),
+            stable_coin_balances: IterableMap::new(b"s".to_vec()),
         }
     }
 }
@@ -121,6 +123,7 @@ impl ShedaContract {
             admins: IterableSet::new(b"a".to_vec()),
             owner_id: owner_id,
             accepted_stablecoin: Vec::new(),
+            stable_coin_balances: IterableMap::new(b"s".to_vec()),
         }
     }
 
@@ -215,6 +218,15 @@ impl ShedaContract {
 
         // Insert the bid into the bids map
         self.bids.entry(property_id).or_insert(Vec::new()).push(bid);
+        //update stablecoin balance
+        let current_balance = self
+            .stable_coin_balances
+            .remove(&env::predecessor_account_id())
+            .unwrap_or(0);
+        self.stable_coin_balances.insert(
+            env::predecessor_account_id(),
+            current_balance + amount.0,
+        );
 
         // Return the bid ID
         U128(0)

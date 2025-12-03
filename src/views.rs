@@ -169,4 +169,13 @@ impl ShedaContract {
         }
         properties
     }
+
+    pub fn supported_stablecoins(&self) -> Vec<AccountId> {
+        self.accepted_stablecoin.clone()
+    }
+
+    pub fn get_stablecoin_balance(&self, token_account: AccountId) -> String {
+        let balance = self.stable_coin_balances.get(&token_account).unwrap_or(&0);
+        balance.to_string()
+    }
 }

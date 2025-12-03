@@ -1,7 +1,9 @@
+pub use crate::ext::*;
 use crate::models::*;
 use crate::views::LeaseView;
 use crate::{models::ContractError, ShedaContract, ShedaContractExt};
-use near_sdk::{env, log, near_bindgen, AccountId, Promise};
+use near_sdk::json_types::U128;
+use near_sdk::{AccountId, Gas, NearToken, env, log, near_bindgen};
 
 #[near_bindgen]
 impl ShedaContract {
@@ -80,25 +82,7 @@ impl ShedaContract {
             .collect()
     }
 
-    pub fn emergency_withdraw(&mut self, to_account: AccountId) {
-        assert_eq!(
-            env::signer_account_id(),
-            self.owner_id,
-            "Only owner can perform emergency withdrawal"
-        );
-
-        let contract_balance = env::account_balance();
-
-        let _ = Promise::new(to_account.clone()).transfer(contract_balance);
-        log!(
-            "Emergency withdrawal of {} yoctoNEAR to {} by owner {}",
-            contract_balance.as_yoctonear(),
-            to_account,
-            env::signer_account_id()
-        );
-    }
-
-    pub fn add_supported_stablecoin(&mut self, token_account: AccountId) -> String {
+    pub fn add_supported_stablecoin(&mut self, token_account: AccountId) {
         assert_eq!(
             env::signer_account_id(),
             self.owner_id,
@@ -111,11 +95,43 @@ impl ShedaContract {
                 token_account,
                 env::signer_account_id()
             );
-            return format!("Stablecoin {} added successfully", token_account);
         }
-        return format!("Stablecoin {} is already supported", token_account);
     }
-    pub fn remove_supported_stablecoin(&mut self, token_account: AccountId) -> String {
+
+    //withdraw supported stablecoin from contract
+    #[payable]
+    pub fn emergency_withdraw(&mut self, to_account: AccountId) {
+        //get balances from contract struct
+        assert_eq!(
+            env::signer_account_id(),
+            self.owner_id,
+            "Only owner can perform emergency withdrawal"
+        );
+        let supported_stables = self.accepted_stablecoin.clone();
+        for token in supported_stables.iter() {
+            let balance = *self.stable_coin_balances.get(token).unwrap_or(&0);
+            assert!(balance > 0, "No balance for token {}", token);
+            //cross contract call to transfer stablecoin to owner
+            #[allow(unused_must_use)]
+            ft_contract::ext(token.clone())
+                .with_attached_deposit(NearToken::from_yoctonear(1))
+                .with_static_gas(Gas::from_tgas(30))
+                .ft_transfer(to_account.clone(), U128(balance));
+            //set balance to 0 after withdrawal
+            self.stable_coin_balances.insert(token.clone(), 0);
+            log!(
+                "Emergency withdrawal of {} {} to {} by owner {}",
+                balance,
+                token,
+                to_account,
+                env::signer_account_id()
+            );
+        }
+    }
+    
+    
+    
+    pub fn remove_supported_stablecoin(&mut self, token_account: AccountId) {
         assert_eq!(
             env::signer_account_id(),
             self.owner_id,
@@ -132,8 +148,6 @@ impl ShedaContract {
                 token_account,
                 env::signer_account_id()
             );
-            return format!("Stablecoin {} removed successfully", token_account);
         }
-        return format!("Stablecoin {} is not supported", token_account);
     }
 }

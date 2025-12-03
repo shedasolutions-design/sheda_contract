@@ -97,4 +97,43 @@ impl ShedaContract {
             env::signer_account_id()
         );
     }
+
+    pub fn add_supported_stablecoin(&mut self, token_account: AccountId) -> String {
+        assert_eq!(
+            env::signer_account_id(),
+            self.owner_id,
+            "Only owner can add supported stablecoins"
+        );
+        if !self.accepted_stablecoin.contains(&token_account) {
+            self.accepted_stablecoin.push(token_account.clone());
+            log!(
+                "Stablecoin {} added by owner {}",
+                token_account,
+                env::signer_account_id()
+            );
+            return format!("Stablecoin {} added successfully", token_account);
+        }
+        return format!("Stablecoin {} is already supported", token_account);
+    }
+    pub fn remove_supported_stablecoin(&mut self, token_account: AccountId) -> String {
+        assert_eq!(
+            env::signer_account_id(),
+            self.owner_id,
+            "Only owner can remove supported stablecoins"
+        );
+        if let Some(index) = self
+            .accepted_stablecoin
+            .iter()
+            .position(|x| x == &token_account)
+        {
+            self.accepted_stablecoin.remove(index);
+            log!(
+                "Stablecoin {} removed by owner {}",
+                token_account,
+                env::signer_account_id()
+            );
+            return format!("Stablecoin {} removed successfully", token_account);
+        }
+        return format!("Stablecoin {} is not supported", token_account);
+    }
 }

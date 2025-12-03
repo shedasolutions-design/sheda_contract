@@ -12,12 +12,20 @@ use near_contract_standards::non_fungible_token::{
     metadata::{NFTContractMetadata, TokenMetadata},
     NonFungibleToken,
 };
+
 use near_sdk::{
     collections::LazyOption,
-    env, near,
+    env,
+    json_types::U128,
+    near,
     store::{IterableMap, IterableSet},
-    AccountId,
+    AccountId, Gas, NearToken,
 };
+
+pub mod ext;
+pub use crate::ext::*;
+
+pub type TokenId = String;
 // Define the contract structure
 #[near(contract_state)]
 pub struct ShedaContract {
@@ -37,6 +45,9 @@ pub struct ShedaContract {
     //admins
     pub admins: IterableSet<AccountId>,
     pub owner_id: AccountId,
+
+    //accepted stablecoin info could go here
+    pub accepted_stablecoin: Vec<AccountId>,
 }
 trait HasNew {
     fn new(media_url: String) -> Self;
@@ -57,6 +68,7 @@ impl HasNew for NFTContractMetadata {
 }
 
 // Define the default, which automatically initializes the contract
+#[cfg(test)]
 impl Default for ShedaContract {
     fn default() -> Self {
         Self {
@@ -78,6 +90,7 @@ impl Default for ShedaContract {
             lease_per_tenant: IterableMap::new(b"t".to_vec()),
             admins: IterableSet::new(b"a".to_vec()),
             owner_id: env::signer_account_id(),
+            accepted_stablecoin: Vec::new(),
         }
     }
 }
@@ -107,6 +120,7 @@ impl ShedaContract {
             lease_per_tenant: IterableMap::new(b"t".to_vec()),
             admins: IterableSet::new(b"a".to_vec()),
             owner_id: owner_id,
+            accepted_stablecoin: Vec::new(),
         }
     }
 
@@ -136,7 +150,7 @@ impl ShedaContract {
             ..Default::default()
         };
 
-        // 3. Mint the Standard NFT (Events & Ownership)
+        //NOTE 3. Mint the Standard NFT (Events & Ownership)
         // This handles "property_per_owner" internally via the standard
         self.token
             .internal_mint(token_id_str, owner_id.clone(), Some(token_metadata));
@@ -152,6 +166,7 @@ impl ShedaContract {
             lease_duration_nanos,
             damage_escrow: 0, // Starts at 0 until leased
             active_lease: None,
+            timestamp: env::block_timestamp(),
         };
 
         // 5. Save Custom Data
@@ -159,6 +174,50 @@ impl ShedaContract {
 
         // 6. Return the ID for the frontend
         property_id
+    }
+
+    #[private]
+    pub fn ft_on_transfer(&mut self, sender_id: AccountId, amount: U128, msg: String) -> U128 {
+        let bid_action =
+            serde_json::from_str::<models::BidAction>(&msg).expect("Invalid BidAction");
+        let property_id = bid_action.property_id;
+
+        let property = self
+            .properties
+            .get(&property_id)
+            .expect("Property not found");
+
+        // Check if the amount matches the price for sale or lease
+        let expected_amount = property.price;
+        if amount.0 != expected_amount {
+            // Refund the full amount
+            #[allow(unused_must_use)]
+            ft_contract::ext(env::predecessor_account_id())
+                .with_attached_deposit(NearToken::from_yoctonear(1))
+                .with_static_gas(Gas::from_tgas(30))
+                .ft_transfer(sender_id, U128(amount.0));
+            return U128(0);
+        }
+
+        // Amount matches, create the bid
+        let bid_id = self.bid_counter;
+        self.bid_counter += 1;
+
+        // Assuming Bid struct has fields: id, property_id, bidder, amount, etc.
+        // Adjust based on actual Bid struct definition
+        let bid = Bid {
+            id: bid_id,
+            property_id: property_id,
+            bidder: sender_id,
+            amount: amount.0,
+            created_at: env::block_timestamp(),
+        };
+
+        // Insert the bid into the bids map
+        self.bids.entry(property_id).or_insert(Vec::new()).push(bid);
+
+        // Return the bid ID
+        U128(0)
     }
 }
 

@@ -28,15 +28,22 @@ pub struct Property {
     pub lease_duration_nanos: Option<u64>, //None if not for lease
     pub damage_escrow: u128,               // Amount held for damages
     pub active_lease: Option<Lease>,
+    pub timestamp: Timestamp,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
 pub struct Bid {
     pub id: u64,
-    pub bidder_id: AccountId,
+    pub bidder: AccountId,
     pub property_id: u64,
-    pub bid_amount: u128,
+    pub amount: u128,
     pub created_at: Timestamp,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
+#[serde(crate = "near_sdk::serde")]
+pub struct BidAction {
+    pub property_id: u64,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone, JsonSchema)]
@@ -110,6 +117,7 @@ pub struct PropertyView {
     pub lease_duration_nanos: Option<u64>,
     pub damage_escrow: u128,
     pub active_lease: Option<LeaseView>,
+    pub timestamp: Timestamp,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -145,6 +153,7 @@ impl Property {
             lease_duration_nanos: self.lease_duration_nanos,
             damage_escrow: self.damage_escrow,
             active_lease: self.active_lease.as_ref().map(|l| l.to_view()),
+            timestamp: self.timestamp,
         }
     }
 }

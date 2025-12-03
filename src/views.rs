@@ -94,9 +94,9 @@ impl From<&Bid> for BidView {
     fn from(bid: &Bid) -> Self {
         BidView {
             id: bid.id,
-            bidder_id: bid.bidder_id.to_string(),
+            bidder_id: bid.bidder.to_string(),
             property_id: bid.property_id,
-            bid_amount: bid.bid_amount.to_string(),
+            bid_amount: bid.amount.to_string(),
             created_at: bid.created_at,
         }
     }

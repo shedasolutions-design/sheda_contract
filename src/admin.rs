@@ -38,12 +38,6 @@ impl ShedaContract {
         self.admins.contains(&account_id)
     }
 
-    pub fn get_admins(&self) -> Vec<AccountId> {
-        
-        log!("Admin {}", env::signer_account_id());
-        self.admins.iter().cloned().collect()
-    }
-
     #[handle_result]
     #[payable]
     pub fn resolve_dispute(&mut self, lease_id: u64) -> Result<(), ContractError> {

@@ -130,6 +130,7 @@ impl HasNew for NFTContractMetadata {
 impl ShedaContract {
     //set required init parameters here
     #[init]
+    #[private]
     pub fn new(media_url: String, supported_stablecoins: Vec<AccountId>) -> Self {
         assert!(!env::state_exists(), "Contract is already initialized");
 
@@ -219,8 +220,6 @@ impl ShedaContract {
     }
 
     //NOTE Placing a Bid
-    #[payable]
-    #[private]
     pub fn ft_on_transfer(&mut self, sender_id: AccountId, amount: U128, msg: String) -> U128 {
         let bid_action: models::BidAction =
             serde_json::from_str::<models::BidAction>(&msg).expect("Invalid BidAction");

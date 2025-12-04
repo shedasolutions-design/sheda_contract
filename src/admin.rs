@@ -1,5 +1,6 @@
 pub use crate::ext::*;
 use crate::internal::extract_base_uri;
+#[allow(unused_imports)]
 use crate::{HasNew, models::*};
 use crate::views::LeaseView;
 use crate::{models::ContractError, ShedaContract, ShedaContractExt};

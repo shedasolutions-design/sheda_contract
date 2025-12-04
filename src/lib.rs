@@ -135,7 +135,7 @@ impl ShedaContract {
 
         let owner_id = env::predecessor_account_id();
 
-        Self {
+        let mut this = Self {
             tokens: NonFungibleToken::new(
                 b"t".to_vec(),
                 owner_id.clone(),
@@ -153,10 +153,16 @@ impl ShedaContract {
             property_per_owner: IterableMap::new(b"o".to_vec()),
             lease_per_tenant: IterableMap::new(b"t".to_vec()),
             admins: IterableSet::new(b"a".to_vec()),
-            owner_id,
-            accepted_stablecoin: supported_stablecoins,
+            owner_id: owner_id.clone(),
+            accepted_stablecoin: supported_stablecoins.clone(),
             stable_coin_balances: IterableMap::new(b"s".to_vec()),
+        };
+        this.admins.insert(owner_id);
+        for stablecoin in supported_stablecoins {
+            this.stable_coin_balances.insert(stablecoin, 0);
         }
+
+        this
     }
 
     #[payable]

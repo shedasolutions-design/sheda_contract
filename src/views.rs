@@ -200,4 +200,71 @@ impl ShedaContract {
         }
         bids
     }
+
+    // Paginated view to get all bids
+    pub fn get_all_bids(&self, from_index: u64, limit: u64) -> Vec<BidView> {
+        let mut result = Vec::new();
+        let mut count = 0;
+        let mut skip_count = 0;
+
+        for (_property_id, bids) in self.bids.iter() {
+            for bid in bids.iter() {
+                if skip_count < from_index {
+                    skip_count += 1;
+                    continue;
+                }
+                if count >= limit {
+                    return result;
+                }
+                result.push(bid.into());
+                count += 1;
+            }
+        }
+        result
+    }
+
+    // Paginated view to get bids for a specific property
+    pub fn get_bids_for_property_paginated(&self, property_id: u64, from_index: u64, limit: u64) -> Vec<BidView> {
+        self.bids
+            .get(&property_id)
+            .map(|bids| {
+                bids.iter()
+                    .skip(from_index as usize)
+                    .take(limit as usize)
+                    .map(|bid| bid.into())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    // Paginated view to get bids by a specific bidder
+    pub fn get_bids_by_bidder(&self, bidder: AccountId, from_index: u64, limit: u64) -> Vec<BidView> {
+        let mut result = Vec::new();
+        let mut count = 0;
+        let mut skip_count = 0;
+
+        for (_property_id, bids) in self.bids.iter() {
+            for bid in bids.iter() {
+                if bid.bidder != bidder {
+                    continue;
+                }
+                if skip_count < from_index {
+                    skip_count += 1;
+                    continue;
+                }
+                if count >= limit {
+                    return result;
+                }
+                result.push(bid.into());
+                count += 1;
+            }
+        }
+        result
+    }
+
+    // Get my bids (bids I've made)
+    pub fn get_my_bids(&self) -> Vec<BidView> {
+        let caller = env::signer_account_id();
+        self.get_bids_by_bidder(caller, 0, 100)
+    }
 }

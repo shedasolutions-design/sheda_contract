@@ -190,12 +190,12 @@ impl ShedaContract {
                 .with_static_gas(Gas::from_tgas(30))
                 .ft_transfer(bidder.clone(), U128(amount));
             //update stablecoin balance
-            let current_balance = self
+            let current_balance = *self
                 .stable_coin_balances
-                .remove(&env::signer_account_id())
-                .unwrap_or(0);
+                .get(&bid.stablecoin_token)
+                .unwrap_or(&0);
             self.stable_coin_balances
-                .insert(env::signer_account_id(), current_balance - amount);
+                .insert(bid.stablecoin_token.clone(), current_balance.saturating_sub(amount));
             log!(
                 "Refunded {} to bidder {} for property {} by admin {}",
                 amount,

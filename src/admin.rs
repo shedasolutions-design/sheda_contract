@@ -272,6 +272,6 @@ impl ShedaContract {
         );
 
         //burn the NFT
-        self.burn_nft(property_id.to_string());
+        crate::internal::burn_nft(self, property_id.to_string());
     }
 }

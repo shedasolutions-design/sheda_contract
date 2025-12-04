@@ -16,7 +16,7 @@ async fn init_contract(worker: &Worker<Sandbox>) -> anyhow::Result<(Contract, Ac
 
     // Initialize the contract
     let stablecoin = worker.dev_create_account().await?;
-    
+
     let outcome = contract
         .call("new")
         .args_json(json!({
@@ -76,10 +76,7 @@ async fn test_owner_is_admin() -> anyhow::Result<()> {
     let owner_id: AccountId = contract.view("get_owner_id").await?.json()?;
     let admins: Vec<AccountId> = contract.view("get_all_admins").await?.json()?;
 
-    assert!(
-        admins.contains(&owner_id),
-        "Owner should be in admin list"
-    );
+    assert!(admins.contains(&owner_id), "Owner should be in admin list");
 
     println!("✅ Owner is admin test passed");
     Ok(())
@@ -196,7 +193,7 @@ async fn test_unsupported_stablecoin_rejected() -> anyhow::Result<()> {
 
     // Try to bid with unsupported stablecoin
     let unsupported_token = worker.dev_create_account().await?;
-    
+
     let outcome = unsupported_token
         .call(contract.id(), "ft_on_transfer")
         .args_json(json!({

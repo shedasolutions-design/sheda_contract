@@ -12,22 +12,22 @@ use crate::{internal::*, models::Action};
 
 #[allow(unused_imports)]
 use near_contract_standards::non_fungible_token::{
+    core::NonFungibleTokenCore,
     metadata::{NFTContractMetadata, TokenMetadata},
-    NonFungibleToken,
-    core::{NonFungibleTokenCore},
-    Token
+    NonFungibleToken, Token,
 };
 use near_sdk::{
-    AccountId, assert_one_yocto, collections::LazyOption, env, json_types::U128, near, require, store::{IterableMap, IterableSet}
+    collections::LazyOption,
+    env,
+    json_types::U128,
+    near, require,
+    store::{IterableMap, IterableSet},
+    AccountId,
 };
-
-
 
 pub use crate::ext::*;
 
 pub type TokenId = String;
-
-
 
 #[near(contract_state)]
 pub struct ShedaContract {
@@ -58,43 +58,50 @@ trait HasNew {
 
 //implement NEP-171 standard, checking that nft is not on lease before transfer
 #[near]
-impl NonFungibleTokenCore for ShedaContract{
+impl NonFungibleTokenCore for ShedaContract {
     #[payable]
     fn nft_transfer(
         &mut self,
-        receiver_id: AccountId, 
+        receiver_id: AccountId,
         token_id: TokenId,
         approval_id: Option<u64>,
-        memo: Option<String>
+        memo: Option<String>,
     ) {
         let property_id = token_id.parse::<u64>().expect("Invalid token ID");
-        let property = self.properties.get(&property_id).expect("Property does not exist");
+        let property = self
+            .properties
+            .get(&property_id)
+            .expect("Property does not exist");
         if let Some(lease) = &property.active_lease {
             if lease.active {
                 env::panic_str("Cannot transfer property while it is on an active lease");
             }
         }
-        self.tokens.nft_transfer(receiver_id, token_id, approval_id, memo);
+        self.tokens
+            .nft_transfer(receiver_id, token_id, approval_id, memo);
     }
-
 
     #[payable]
     fn nft_transfer_call(
         &mut self,
-        receiver_id: AccountId, 
+        receiver_id: AccountId,
         token_id: TokenId,
         approval_id: Option<u64>,
         memo: Option<String>,
         msg: String,
-    )-> near_sdk::PromiseOrValue<bool> {
+    ) -> near_sdk::PromiseOrValue<bool> {
         let property_id = token_id.parse::<u64>().expect("Invalid token ID");
-        let property = self.properties.get(&property_id).expect("Property does not exist");
+        let property = self
+            .properties
+            .get(&property_id)
+            .expect("Property does not exist");
         if let Some(lease) = &property.active_lease {
             if lease.active {
                 env::panic_str("Cannot transfer property while it is on an active lease");
             }
         }
-        self.tokens.nft_transfer_call(receiver_id, token_id, approval_id, memo, msg)
+        self.tokens
+            .nft_transfer_call(receiver_id, token_id, approval_id, memo, msg)
     }
 
     fn nft_token(&self, token_id: TokenId) -> Option<Token> {
@@ -169,41 +176,6 @@ impl ShedaContract {
         this
     }
 
-    #[private]
-    #[payable]
-    pub fn burn_nft(&mut self, token_id: TokenId) {
-        assert_one_yocto();
-
-        let token = self.tokens.nft_token(token_id.clone()).expect("Token not found");
-
-        assert_eq!(
-            env::signer_account_id(),
-            token.owner_id,
-            "Only owner can burn"
-        );
-
-        // Remove token ownership and metadata
-        self.tokens.owner_by_id.remove(&token_id);
-        if let Some(tokens_per_owner) = self.tokens.tokens_per_owner.as_mut() {
-            let mut owner_tokens = tokens_per_owner.get(&token.owner_id).unwrap_or_else(|| {
-                env::panic_str("Unable to access tokens per owner in unguarded call.")
-            });
-            owner_tokens.remove(&token_id);
-            if owner_tokens.is_empty() {
-                tokens_per_owner.remove(&token.owner_id);
-            } else {
-                tokens_per_owner.insert(&token.owner_id.clone(),&owner_tokens);
-            }
-        }
-        if let Some(token_metadata_by_id) = self.tokens.token_metadata_by_id.as_mut() {
-            token_metadata_by_id.remove(&token_id);
-        }
-        if let Some(approvals_by_id) = self.tokens.approvals_by_id.as_mut() {
-            approvals_by_id.remove(&token_id);
-        }
-    }
-
-
     #[payable]
     pub fn mint_property(
         &mut self,
@@ -234,8 +206,6 @@ impl ShedaContract {
         // This handles "property_per_owner" internally via the standard
         self.tokens
             .internal_mint(token_id_str, owner_id.clone(), Some(token_metadata));
-
-        
 
         // 4. Create Your Custom Property Object
         let property = Property {
@@ -320,7 +290,7 @@ impl ShedaContract {
 
         // Insert the bid into the bids map
         self.bids.entry(property_id).or_insert(Vec::new()).push(bid);
-        
+
         //update stablecoin balance
         let current_balance = *self
             .stable_coin_balances
@@ -370,7 +340,6 @@ impl ShedaContract {
     pub fn cron_check_leases(&mut self) {
         internal_cron_check_leases(self);
     }
-
 }
 
 /*

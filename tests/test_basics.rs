@@ -14,7 +14,5 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn std::error::
 
     let user_account = sandbox.dev_create_account().await?;
 
-    
-
     Ok(())
 }

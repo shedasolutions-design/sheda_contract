@@ -1,11 +1,11 @@
-use near_sdk::{ Gas, NearToken, env, json_types::U128, log};
+use near_contract_standards::non_fungible_token::core::NonFungibleTokenCore;
+use near_sdk::{assert_one_yocto, env, json_types::U128, log, Gas, NearToken};
 
 use crate::{
     ext::ft_contract,
     models::{Action, Bid},
     ShedaContract,
 };
-
 
 pub fn extract_base_uri(url: &str) -> String {
     if let Some(cid) = url.split("/ipfs/").nth(1) {
@@ -15,6 +15,41 @@ pub fn extract_base_uri(url: &str) -> String {
     // fallback base_uri = origin of the URL
     // ex: https://example.com/path/image.png → https://example.com
     url.split('/').take(3).collect::<Vec<_>>().join("/")
+}
+
+pub fn burn_nft(contract: &mut ShedaContract, token_id: String) {
+    assert_one_yocto();
+
+    let token = contract
+        .tokens
+        .nft_token(token_id.clone())
+        .expect("Token not found");
+
+    assert_eq!(
+        env::signer_account_id(),
+        token.owner_id,
+        "Only owner can burn"
+    );
+
+    // Remove token ownership and metadata
+    contract.tokens.owner_by_id.remove(&token_id);
+    if let Some(tokens_per_owner) = contract.tokens.tokens_per_owner.as_mut() {
+        let mut owner_tokens = tokens_per_owner.get(&token.owner_id).unwrap_or_else(|| {
+            env::panic_str("Unable to access tokens per owner in unguarded call.")
+        });
+        owner_tokens.remove(&token_id);
+        if owner_tokens.is_empty() {
+            tokens_per_owner.remove(&token.owner_id);
+        } else {
+            tokens_per_owner.insert(&token.owner_id.clone(), &owner_tokens);
+        }
+    }
+    if let Some(token_metadata_by_id) = contract.tokens.token_metadata_by_id.as_mut() {
+        token_metadata_by_id.remove(&token_id);
+    }
+    if let Some(approvals_by_id) = contract.tokens.approvals_by_id.as_mut() {
+        approvals_by_id.remove(&token_id);
+    }
 }
 
 pub fn internal_accept_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) {
@@ -226,17 +261,11 @@ pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) 
 
     assert!(property.sold.is_none(), "Cannot delete a sold property");
 
-    contract.burn_nft(property_id.to_string());
-
-
+    burn_nft(contract, property_id.to_string());
 
     // Remove the property from storage
     contract.properties.remove(&property_id);
 }
-
-
-
-
 
 pub fn internal_raise_dispute(contract: &mut ShedaContract, lease_id: u64) {
     let mut lease = contract
@@ -287,8 +316,7 @@ pub fn internal_cron_check_leases(contract: &mut ShedaContract) {
             updated_property.active_lease = None;
             contract
                 .properties
-                .insert(lease.property_id, updated_property);   
+                .insert(lease.property_id, updated_property);
         }
     }
 }
-

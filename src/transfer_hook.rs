@@ -29,6 +29,14 @@ impl Hook<ShedaContract, Nep171Transfer<'_>> for TransferHook {
         );
 
         //check that the token being transferred is not under dispute or leased
+        let property = contract
+            .properties
+            .get(&transfer.token_id.parse::<u64>().unwrap())
+            .expect("Property not found");
+            assert!(
+                property.active_lease.is_none(),
+                "Cannot transfer a property that is currently leased"
+            );
 
         r
     }

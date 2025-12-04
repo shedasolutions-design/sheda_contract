@@ -18,12 +18,14 @@ use near_contract_standards::non_fungible_token::{
     Token
 };
 use near_sdk::{
-    AccountId, assert_one_yocto, collections::LazyOption, env, json_types::U128, near, require, store::{IterableMap, IterableSet}
+    AccountId, collections::LazyOption, env, json_types::U128, near, require, store::{IterableMap, IterableSet}
 };
+
 
 pub use crate::ext::*;
 
 pub type TokenId = String;
+
 
 
 
@@ -165,15 +167,6 @@ impl ShedaContract {
 
         this
     }
-
-    #[payable]
-    pub fn nft_burn(&mut self, token_id: TokenId) {
-        assert_one_yocto();
-
-        Nep177Controller::burn_with_metadata(self, &token_id, &env::predecessor_account_id())
-            .unwrap_or_else(|e| env::panic_str(&e.to_string()));
-    }
-
 
     #[payable]
     pub fn mint_property(

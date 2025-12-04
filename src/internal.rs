@@ -3,7 +3,7 @@ use std::str::FromStr;
 use near_sdk::{AccountId, Gas, NearToken, env, json_types::U128, log};
 
 use crate::{
-    ft_contract,
+    ext::ft_contract,
     models::{Action, Bid},
     ShedaContract,
 };
@@ -229,15 +229,15 @@ pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) 
     assert!(property.sold.is_none(), "Cannot delete a sold property");
 
     //burn the NFT
-    // contract.token.internal_transfer(
-    //     &property.owner_id,
-    //     &get_burn_account_id(),
-    //     &property_id.to_string(),
-    //     None,
-    //     None,
-    // );
+    contract.tokens.internal_transfer(
+        &property.owner_id,
+        &get_burn_account_id(),
+        &property_id.to_string(),
+        None,
+        None,
+    );
 
-    contract.nft_burn(property_id.to_string());
+
 
     // Remove the property from storage
     contract.properties.remove(&property_id);

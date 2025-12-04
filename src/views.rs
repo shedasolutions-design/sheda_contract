@@ -206,24 +206,13 @@ impl ShedaContract {
 
     // Paginated view to get all bids
     pub fn get_all_bids(&self, from_index: u64, limit: u64) -> Vec<BidView> {
-        let mut result = Vec::new();
-        let mut count = 0;
-        let mut skip_count = 0;
-
-        for (_property_id, bids) in self.bids.iter() {
-            for bid in bids.iter() {
-                if skip_count < from_index {
-                    skip_count += 1;
-                    continue;
-                }
-                if count >= limit {
-                    return result;
-                }
-                result.push(bid.into());
-                count += 1;
-            }
-        }
-        result
+        self.bids
+            .iter()
+            .flat_map(|(_property_id, bids)| bids.iter())
+            .skip(from_index as usize)
+            .take(limit as usize)
+            .map(|bid| bid.into())
+            .collect()
     }
 
     // Paginated view to get bids for a specific property
@@ -242,27 +231,14 @@ impl ShedaContract {
 
     // Paginated view to get bids by a specific bidder
     pub fn get_bids_by_bidder(&self, bidder: AccountId, from_index: u64, limit: u64) -> Vec<BidView> {
-        let mut result = Vec::new();
-        let mut count = 0;
-        let mut skip_count = 0;
-
-        for (_property_id, bids) in self.bids.iter() {
-            for bid in bids.iter() {
-                if bid.bidder != bidder {
-                    continue;
-                }
-                if skip_count < from_index {
-                    skip_count += 1;
-                    continue;
-                }
-                if count >= limit {
-                    return result;
-                }
-                result.push(bid.into());
-                count += 1;
-            }
-        }
-        result
+        self.bids
+            .iter()
+            .flat_map(|(_property_id, bids)| bids.iter())
+            .filter(|bid| bid.bidder == bidder)
+            .skip(from_index as usize)
+            .take(limit as usize)
+            .map(|bid| bid.into())
+            .collect()
     }
 
     // Get my bids (bids I've made)

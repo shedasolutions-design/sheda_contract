@@ -18,11 +18,12 @@ pub fn extract_base_uri(url: &str) -> String {
 }
 
 // Storage deposit check helper - can be used in payable methods that create new storage
-// Example usage: assert_storage_deposit();
+// Example usage: assert_storage_deposit_for_bytes(1000);
+// The bytes parameter should be estimated based on the size of data being stored
 #[allow(dead_code)]
-pub fn assert_storage_deposit() {
+pub fn assert_storage_deposit_for_bytes(estimated_bytes: u128) {
     let attached = env::attached_deposit();
-    let required = near_sdk::env::storage_byte_cost().saturating_mul(1000); // Estimate 1000 bytes
+    let required = near_sdk::env::storage_byte_cost().saturating_mul(estimated_bytes);
     
     require!(
         attached >= required,

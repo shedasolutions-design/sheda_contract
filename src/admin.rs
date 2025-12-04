@@ -1,7 +1,9 @@
 pub use crate::ext::*;
-use crate::models::*;
+use crate::internal::extract_base_uri;
+use crate::{HasNew, models::*};
 use crate::views::LeaseView;
 use crate::{models::ContractError, ShedaContract, ShedaContractExt};
+use near_contract_standards::non_fungible_token::metadata::NFTContractMetadata;
 use near_sdk::json_types::U128;
 use near_sdk::{env, log, near_bindgen, AccountId, Gas, NearToken, PromiseResult};
 
@@ -312,4 +314,26 @@ impl ShedaContract {
         //burn the NFT
         crate::internal::burn_nft(self, property_id.to_string());
     }
+
+    pub fn admin_change_nft_metadata(&mut self, image_url: String, name: String, symbol:String) {
+        assert!(
+            self.is_admin(env::signer_account_id()),
+            "UnauthorizedAccess"
+        );
+        let new_metadata = NFTContractMetadata {
+            spec: "nft-1.0.0".to_string(),
+            name: name,
+            symbol: symbol,
+            icon: Some(image_url.clone()),
+            base_uri: Some(extract_base_uri(&image_url)),
+            reference: None,
+            reference_hash: None,
+        };
+        self.metadata.set(&new_metadata);
+        log!(
+            "NFT metadata changed by admin {}",
+            env::signer_account_id()
+        );
+    }
+    
 }

@@ -1,6 +1,4 @@
-use std::str::FromStr;
-
-use near_sdk::{AccountId, Gas, NearToken, env, json_types::U128, log};
+use near_sdk::{ Gas, NearToken, env, json_types::U128, log};
 
 use crate::{
     ext::ft_contract,
@@ -217,7 +215,7 @@ pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) 
 
     assert_eq!(
         property.owner_id,
-        env::predecessor_account_id(),
+        env::signer_account_id(),
         "Only the property owner can delete the property"
     );
 
@@ -228,14 +226,7 @@ pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) 
 
     assert!(property.sold.is_none(), "Cannot delete a sold property");
 
-    //burn the NFT
-    contract.tokens.internal_transfer(
-        &property.owner_id,
-        &get_burn_account_id(),
-        &property_id.to_string(),
-        None,
-        None,
-    );
+    contract.burn_nft(property_id.to_string());
 
 
 
@@ -245,15 +236,7 @@ pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) 
 
 
 
-pub fn get_burn_account_id() -> AccountId {
-    let acc = env::current_account_id();
 
-    if acc.as_str().ends_with(".testnet") {
-        AccountId::from_str("burn.testnet").expect("Failed to convert address")
-    } else {
-        AccountId::from_str("burn.near").expect("Failed to convert address")
-    }
-}
 
 pub fn internal_raise_dispute(contract: &mut ShedaContract, lease_id: u64) {
     let mut lease = contract

@@ -1,5 +1,4 @@
 pub use crate::ext::*;
-use crate::internal::*;
 use crate::models::*;
 use crate::views::LeaseView;
 use crate::{models::ContractError, ShedaContract, ShedaContractExt};
@@ -273,12 +272,6 @@ impl ShedaContract {
         );
 
         //burn the NFT
-        self.tokens.internal_transfer(
-            &property.owner_id,
-            &get_burn_account_id(),
-            &property_id.to_string(),
-            None,
-            None,
-        );
+        self.burn_nft(property_id.to_string());
     }
 }

@@ -18,14 +18,14 @@ use near_contract_standards::non_fungible_token::{
     Token
 };
 use near_sdk::{
-    AccountId, collections::LazyOption, env, json_types::U128, near, require, store::{IterableMap, IterableSet}
+    AccountId, assert_one_yocto, collections::LazyOption, env, json_types::U128, near, require, store::{IterableMap, IterableSet}
 };
+
 
 
 pub use crate::ext::*;
 
 pub type TokenId = String;
-
 
 
 
@@ -76,6 +76,7 @@ impl NonFungibleTokenCore for ShedaContract{
         }
         self.tokens.nft_transfer(receiver_id, token_id, approval_id, memo);
     }
+
 
     #[payable]
     fn nft_transfer_call(
@@ -169,6 +170,40 @@ impl ShedaContract {
     }
 
     #[payable]
+    pub fn burn_nft(&mut self, token_id: TokenId) {
+        assert_one_yocto();
+
+        let token = self.tokens.nft_token(token_id.clone()).expect("Token not found");
+
+        assert_eq!(
+            env::signer_account_id(),
+            token.owner_id,
+            "Only owner can burn"
+        );
+
+        // Remove token ownership and metadata
+        self.tokens.owner_by_id.remove(&token_id);
+        if let Some(tokens_per_owner) = self.tokens.tokens_per_owner.as_mut() {
+            let mut owner_tokens = tokens_per_owner.get(&token.owner_id).unwrap_or_else(|| {
+                env::panic_str("Unable to access tokens per owner in unguarded call.")
+            });
+            owner_tokens.remove(&token_id);
+            if owner_tokens.is_empty() {
+                tokens_per_owner.remove(&token.owner_id);
+            } else {
+                tokens_per_owner.insert(&token.owner_id.clone(),&owner_tokens);
+            }
+        }
+        if let Some(token_metadata_by_id) = self.tokens.token_metadata_by_id.as_mut() {
+            token_metadata_by_id.remove(&token_id);
+        }
+        if let Some(approvals_by_id) = self.tokens.approvals_by_id.as_mut() {
+            approvals_by_id.remove(&token_id);
+        }
+    }
+
+
+    #[payable]
     pub fn mint_property(
         &mut self,
         title: String,
@@ -198,6 +233,8 @@ impl ShedaContract {
         // This handles "property_per_owner" internally via the standard
         self.tokens
             .internal_mint(token_id_str, owner_id.clone(), Some(token_metadata));
+
+        
 
         // 4. Create Your Custom Property Object
         let property = Property {
@@ -327,7 +364,7 @@ impl ShedaContract {
     pub fn raise_dispute(&mut self, lease_id: u64) {
         internal_raise_dispute(self, lease_id);
     }
-
+    #[private]
     #[payable]
     pub fn cron_check_leases(&mut self) {
         internal_cron_check_leases(self);

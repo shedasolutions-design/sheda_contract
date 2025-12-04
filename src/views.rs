@@ -54,6 +54,7 @@ impl From<&DisputeStatus> for DisputeStatusView {
             DisputeStatus::None => "none",
             DisputeStatus::Raised => "raised",
             DisputeStatus::Resolved => "resolved",
+            DisputeStatus::PendingTenantResponse => "pending_tenant_response",
         };
         DisputeStatusView {
             status: status_str.to_string(),

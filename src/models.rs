@@ -13,6 +13,7 @@ pub enum DisputeStatus {
     None,
     Raised,
     Resolved,
+    PendingTenantResponse,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
@@ -89,7 +90,7 @@ pub enum ContractError {
     UnauthorizedAccess,
     DisputeAlreadyRaised,
     LeaseNotFound,
-    
+
     // Added for Stablecoin logic
     InvalidPaymentToken,
     IncorrectBidAmount { expected: u128, received: u128 },

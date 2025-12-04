@@ -332,7 +332,7 @@ impl ShedaContract {
     pub fn cron_check_leases(&mut self) {
         internal_cron_check_leases(self);
     }
- 
+
 }
 
 /*

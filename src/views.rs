@@ -5,6 +5,9 @@ use schemars::JsonSchema;
 
 /// View structs for JSON serialization - separate from internal models
 
+// Default pagination limit for view methods
+const DEFAULT_PAGINATION_LIMIT: u64 = 100;
+
 #[derive(serde::Serialize, serde::Deserialize, JsonSchema)]
 pub struct DisputeStatusView {
     pub status: String,
@@ -265,6 +268,6 @@ impl ShedaContract {
     // Get my bids (bids I've made)
     pub fn get_my_bids(&self) -> Vec<BidView> {
         let caller = env::signer_account_id();
-        self.get_bids_by_bidder(caller, 0, 100)
+        self.get_bids_by_bidder(caller, 0, DEFAULT_PAGINATION_LIMIT)
     }
 }

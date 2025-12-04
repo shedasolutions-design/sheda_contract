@@ -349,7 +349,7 @@ impl ShedaContract {
 
     // Allow bidders to manually claim/withdraw their bid that was not accepted
     #[payable]
-    pub fn claim_lost_bid(&mut self, bid_id: u64, property_id: u64) {
+    pub fn claim_lost_bid(&mut self, bid_id: u64, property_id: u64) -> near_sdk::Promise {
         let bids = self.bids.get(&property_id).expect("No bids for this property");
         
         let bid = bids
@@ -382,13 +382,12 @@ impl ShedaContract {
         assert!(can_claim, "Cannot claim bid: property not yet sold/leased to another party");
 
         // Refund the bid amount
-        #[allow(unused_must_use)]
-        crate::ext::ft_contract::ext(bid.stablecoin_token.clone())
+        let promise = crate::ext::ft_contract::ext(bid.stablecoin_token.clone())
             .with_attached_deposit(near_sdk::NearToken::from_yoctonear(1))
             .with_static_gas(near_sdk::Gas::from_tgas(30))
             .ft_transfer(bid.bidder.clone(), near_sdk::json_types::U128(bid.amount));
 
-        // Update stablecoin balance
+        // Update stablecoin balance after refund
         let current_balance = *self
             .stable_coin_balances
             .get(&bid.stablecoin_token)
@@ -396,13 +395,37 @@ impl ShedaContract {
         self.stable_coin_balances
             .insert(bid.stablecoin_token.clone(), current_balance.saturating_sub(bid.amount));
 
-        // Remove the bid
-        self.bids
-            .get_mut(&property_id)
-            .unwrap()
-            .retain(|b| b.id != bid_id);
+        // Return promise and handle callback to remove bid only on success
+        promise.then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(near_sdk::Gas::from_tgas(20))
+                .claim_lost_bid_callback(bid_id, property_id, bid.stablecoin_token.clone(), bid.amount)
+        )
+    }
 
-        near_sdk::log!("Bid {} claimed by {}", bid_id, bid.bidder);
+    #[private]
+    pub fn claim_lost_bid_callback(&mut self, bid_id: u64, property_id: u64, stablecoin_token: AccountId, amount: u128) {
+        match env::promise_result(0) {
+            near_sdk::PromiseResult::Successful(_) => {
+                // Remove the bid only if transfer succeeded
+                self.bids
+                    .get_mut(&property_id)
+                    .map(|bids| bids.retain(|b| b.id != bid_id));
+
+                near_sdk::log!("Bid {} claimed successfully", bid_id);
+            }
+            near_sdk::PromiseResult::Failed => {
+                // Revert the balance update if transfer failed
+                let current_balance = *self
+                    .stable_coin_balances
+                    .get(&stablecoin_token)
+                    .unwrap_or(&0);
+                self.stable_coin_balances
+                    .insert(stablecoin_token, current_balance + amount);
+
+                near_sdk::log!("Bid claim failed, balance reverted");
+            }
+        }
     }
 }
 

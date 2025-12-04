@@ -17,7 +17,9 @@ pub fn extract_base_uri(url: &str) -> String {
     url.split('/').take(3).collect::<Vec<_>>().join("/")
 }
 
-// Storage deposit check helper
+// Storage deposit check helper - can be used in payable methods that create new storage
+// Example usage: assert_storage_deposit();
+#[allow(dead_code)]
 pub fn assert_storage_deposit() {
     let attached = env::attached_deposit();
     let required = near_sdk::env::storage_byte_cost().saturating_mul(1000); // Estimate 1000 bytes
@@ -140,16 +142,16 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
                 None,
             );
 
-            // Remove the accepted bid from storage
-            contract
-                .bids
-                .get_mut(&property_id)
-                .unwrap()
-                .retain(|b| b.id != bid_id);
-
-            //release other bids for the property
+            // Get all remaining bids BEFORE removing the accepted bid
             let remaining_bids = contract.bids.get(&property_id).unwrap_or(&Vec::new()).clone();
+            
+            // Refund other bids for the property (all except the accepted one)
             for other_bid in remaining_bids.iter() {
+                if other_bid.id == bid_id {
+                    // Skip the accepted bid
+                    continue;
+                }
+                
                 // Refund stablecoin to other bidders
                 #[allow(unused_must_use)]
                 ft_contract::ext(other_bid.stablecoin_token.clone())
@@ -166,14 +168,10 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
                     other_bid.stablecoin_token.clone(),
                     current_balance.saturating_sub(other_bid.amount),
                 );
-
-                // Remove the bid from storage
-                contract
-                    .bids
-                    .get_mut(&property_id)
-                    .unwrap()
-                    .retain(|b| b.id != other_bid.id);
             }
+
+            // Remove all bids for this property
+            contract.bids.remove(&property_id);
 
             //lease or mark as sold
             match bid.action {

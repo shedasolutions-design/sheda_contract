@@ -1,13 +1,13 @@
 use std::str::FromStr;
 
-use near_sdk::{env, json_types::U128, AccountId, Gas, NearToken};
+use near_sdk::{AccountId, Gas, NearToken, env, json_types::U128, log};
 
 use crate::{
     ft_contract,
     models::{Action, Bid},
     ShedaContract,
 };
-use near_sdk_contract_tools::nft::Nep177Controller;
+
 
 pub fn extract_base_uri(url: &str) -> String {
     if let Some(cid) = url.split("/ipfs/").nth(1) {
@@ -52,7 +52,7 @@ pub fn internal_accept_bid(contract: &mut ShedaContract, property_id: u64, bid_i
         .ft_transfer(property.owner_id.clone(), U128(bid.amount));
 
     // Transfer NFT to bidder
-    contract.token.internal_transfer(
+    contract.tokens.internal_transfer(
         &property.owner_id,
         &bid.bidder,
         &property_id.to_string(),
@@ -236,14 +236,14 @@ pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) 
     //     None,
     //     None,
     // );
-    
-    Nep177Controller::burn_with_metadata(contract, &property_id.to_string(), &env::predecessor_account_id())
-            .unwrap_or_else(|e| env::panic_str(&e.to_string()));
-    
+
+    contract.nft_burn(property_id.to_string());
 
     // Remove the property from storage
     contract.properties.remove(&property_id);
 }
+
+
 
 pub fn get_burn_account_id() -> AccountId {
     let acc = env::current_account_id();
@@ -252,5 +252,59 @@ pub fn get_burn_account_id() -> AccountId {
         AccountId::from_str("burn.testnet").expect("Failed to convert address")
     } else {
         AccountId::from_str("burn.near").expect("Failed to convert address")
+    }
+}
+
+pub fn internal_raise_dispute(contract: &mut ShedaContract, lease_id: u64) {
+    let mut lease = contract
+        .leases
+        .get(&lease_id)
+        .cloned()
+        .expect("Lease not found");
+
+    assert_eq!(
+        lease.tenant_id,
+        env::predecessor_account_id(),
+        "Only the tenant can raise a dispute"
+    );
+
+    assert_eq!(
+        lease.dispute_status,
+        crate::models::DisputeStatus::None,
+        "Dispute already raised for this lease"
+    );
+
+    lease.dispute_status = crate::models::DisputeStatus::Raised;
+
+    contract.leases.insert(lease_id, lease);
+}
+
+pub fn internal_cron_check_leases(contract: &mut ShedaContract) {
+    let current_time = env::block_timestamp();
+
+    for (lease_id, lease) in contract.leases.iter_mut() {
+        if lease.active && lease.end_time <= current_time {
+            lease.active = false;
+            log!("Lease {} has ended and is now inactive", lease_id);
+            // transfer NFT back to owner
+            let property = contract
+                .properties
+                .get(&lease.property_id)
+                .expect("Property not found");
+            contract.tokens.internal_transfer(
+                &lease.tenant_id,
+                &property.owner_id,
+                &lease.property_id.to_string(),
+                None,
+                None,
+            );
+
+            // update property to remove active lease
+            let mut updated_property = property.clone();
+            updated_property.active_lease = None;
+            contract
+                .properties
+                .insert(lease.property_id, updated_property);   
+        }
     }
 }

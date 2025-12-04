@@ -273,7 +273,7 @@ impl ShedaContract {
         );
 
         //burn the NFT
-        self.token.internal_transfer(
+        self.tokens.internal_transfer(
             &property.owner_id,
             &get_burn_account_id(),
             &property_id.to_string(),

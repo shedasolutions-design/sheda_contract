@@ -4,33 +4,32 @@ pub mod events;
 pub mod internal;
 pub mod models;
 pub mod views;
-pub mod transfer_hook;
+
 pub mod ext;
 #[allow(unused_imports)]
 use crate::models::{Bid, ContractError, DisputeStatus, Lease, Property};
 use crate::{internal::*, models::Action};
+
 #[allow(unused_imports)]
 use near_contract_standards::non_fungible_token::{
     metadata::{NFTContractMetadata, TokenMetadata},
     NonFungibleToken,
+    core::{NonFungibleTokenCore},
+    Token
 };
-
 use near_sdk::{
     AccountId, assert_one_yocto, collections::LazyOption, env, json_types::U128, near, require, store::{IterableMap, IterableSet}
 };
-#[allow(unused_imports)]
-use near_sdk_contract_tools::{Owner, nft::*, owner::*};
-use crate::transfer_hook::TransferHook;
+
 pub use crate::ext::*;
 
 pub type TokenId = String;
-// Define the contract structure
 
-#[derive( Owner, NonFungibleToken)]
-#[non_fungible_token(transfer_hook = "TransferHook")]
+
+
 #[near(contract_state)]
 pub struct ShedaContract {
-    pub token: NonFungibleToken,
+    pub tokens: NonFungibleToken,
     pub metadata: LazyOption<NFTContractMetadata>,
     pub properties: IterableMap<u64, Property>,
     pub bids: IterableMap<u64, Vec<Bid>>, //property_id to list of bids
@@ -55,6 +54,51 @@ trait HasNew {
     fn new(media_url: String) -> Self;
 }
 
+//implement NEP-171 standard, checking that nft is not on lease before transfer
+#[near]
+impl NonFungibleTokenCore for ShedaContract{
+    #[payable]
+    fn nft_transfer(
+        &mut self,
+        receiver_id: AccountId, 
+        token_id: TokenId,
+        approval_id: Option<u64>,
+        memo: Option<String>
+    ) {
+        let property_id = token_id.parse::<u64>().expect("Invalid token ID");
+        let property = self.properties.get(&property_id).expect("Property does not exist");
+        if let Some(lease) = &property.active_lease {
+            if lease.active {
+                env::panic_str("Cannot transfer property while it is on an active lease");
+            }
+        }
+        self.tokens.nft_transfer(receiver_id, token_id, approval_id, memo);
+    }
+
+    #[payable]
+    fn nft_transfer_call(
+        &mut self,
+        receiver_id: AccountId, 
+        token_id: TokenId,
+        approval_id: Option<u64>,
+        memo: Option<String>,
+        msg: String,
+    )-> near_sdk::PromiseOrValue<bool> {
+        let property_id = token_id.parse::<u64>().expect("Invalid token ID");
+        let property = self.properties.get(&property_id).expect("Property does not exist");
+        if let Some(lease) = &property.active_lease {
+            if lease.active {
+                env::panic_str("Cannot transfer property while it is on an active lease");
+            }
+        }
+        self.tokens.nft_transfer_call(receiver_id, token_id, approval_id, memo, msg)
+    }
+
+    fn nft_token(&self, token_id: TokenId) -> Option<Token> {
+        self.tokens.nft_token(token_id)
+    }
+}
+
 impl HasNew for NFTContractMetadata {
     fn new(media_url: String) -> Self {
         Self {
@@ -74,7 +118,7 @@ impl HasNew for NFTContractMetadata {
 impl Default for ShedaContract {
     fn default() -> Self {
         Self {
-            token: NonFungibleToken::new(
+            tokens: NonFungibleToken::new(
                 b"t".to_vec(),
                 env::signer_account_id(),
                 Some(b"m".to_vec()),
@@ -123,6 +167,15 @@ impl ShedaContract {
     }
 
     #[payable]
+    pub fn nft_burn(&mut self, token_id: TokenId) {
+        assert_one_yocto();
+
+        Nep177Controller::burn_with_metadata(self, &token_id, &env::predecessor_account_id())
+            .unwrap_or_else(|e| env::panic_str(&e.to_string()));
+    }
+
+
+    #[payable]
     pub fn mint_property(
         &mut self,
         title: String,
@@ -150,7 +203,7 @@ impl ShedaContract {
 
         //NOTE 3. Mint the Standard NFT (Events & Ownership)
         // This handles "property_per_owner" internally via the standard
-        self.token
+        self.tokens
             .internal_mint(token_id_str, owner_id.clone(), Some(token_metadata));
 
         // 4. Create Your Custom Property Object
@@ -274,9 +327,19 @@ impl ShedaContract {
 
     #[payable]
     pub fn delete_property(&mut self, property_id: u64) {
-        assert_one_yocto();
         internal_delete_property(self, property_id);
     }
+
+    #[payable]
+    pub fn raise_dispute(&mut self, lease_id: u64) {
+        internal_raise_dispute(self, lease_id);
+    }
+
+    #[payable]
+    pub fn cron_check_leases(&mut self) {
+        internal_cron_check_leases(self);
+    }
+ 
 }
 
 /*

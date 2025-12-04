@@ -115,7 +115,7 @@ impl ShedaContract {
         self.admins.iter().cloned().collect()
     }
 
-    pub fn is_caller_admin(&self) -> bool {
+    pub fn is_caller_admin(&mut self) -> bool {
         let caller: AccountId = near_sdk::env::signer_account_id();
         self.admins.contains(&caller)
     }
@@ -188,12 +188,12 @@ impl ShedaContract {
     }
 
     //NOTE Poperty Owner specific
-    pub fn get_my_properties(&self) -> Vec<PropertyView> {
+    pub fn get_my_properties(&mut self) -> Vec<PropertyView> {
         let caller = env::signer_account_id();
         self.get_property_by_owner(caller)
     }
 
-    pub fn get_bids_on_my_property(&self) -> Vec<BidView> {
+    pub fn get_bids_on_my_property(&mut self) -> Vec<BidView> {
         let caller = env::signer_account_id();
         let properties = self.get_property_by_owner(caller);
         let mut bids = Vec::new();
@@ -230,7 +230,8 @@ impl ShedaContract {
     }
 
     // Paginated view to get bids by a specific bidder
-    pub fn get_bids_by_bidder(&self, bidder: AccountId, from_index: u64, limit: u64) -> Vec<BidView> {
+    #[payable]
+    pub fn get_bids_by_bidder(&mut self, bidder: AccountId, from_index: u64, limit: u64) -> Vec<BidView> {
         self.bids
             .iter()
             .flat_map(|(_property_id, bids)| bids.iter())
@@ -242,8 +243,53 @@ impl ShedaContract {
     }
 
     // Get my bids (bids I've made)
-    pub fn get_my_bids(&self) -> Vec<BidView> {
+    pub fn get_my_bids(&mut self) -> Vec<BidView> {
         let caller = env::signer_account_id();
         self.get_bids_by_bidder(caller, 0, DEFAULT_PAGINATION_LIMIT)
+    }
+
+    // Alternative view methods (non-payable, read-only) to reduce gas costs for off-chain views
+
+    pub fn view_is_admin(&self, account_id: AccountId) -> bool {
+        self.admins.contains(&account_id)
+    }
+
+    pub fn view_bids_on_properties_of_owner(&self, owner_id: AccountId) -> Vec<BidView> {
+        let properties = self.get_property_by_owner(owner_id);
+        let mut bids = Vec::new();
+        for property in properties {
+            let property_bids = self.get_bids_for_property(property.id);
+            bids.extend(property_bids);
+        }
+        bids
+    }
+
+    pub fn view_bids_by_bidder(&self, bidder: AccountId, from_index: u64, limit: u64) -> Vec<BidView> {
+        self.bids
+            .iter()
+            .flat_map(|(_property_id, bids)| bids.iter())
+            .filter(|bid| bid.bidder == bidder)
+            .skip(from_index as usize)
+            .take(limit as usize)
+            .map(|bid| bid.into())
+            .collect()
+    }
+
+    pub fn get_leases_by_tenant(&self, tenant_id: AccountId) -> Vec<LeaseView> {
+        let lease_ids = self.lease_per_tenant.get(&tenant_id);
+        let mut leases = Vec::new();
+        if let Some(ids) = lease_ids {
+            for id in ids {
+                if let Some(lease) = self.leases.get(&id) {
+                    leases.push(lease.into());
+                }
+            }
+        }
+        leases
+    }
+
+    pub fn get_my_leases(&mut self) -> Vec<LeaseView> {
+        let caller = env::signer_account_id();
+        self.get_leases_by_tenant(caller)
     }
 }

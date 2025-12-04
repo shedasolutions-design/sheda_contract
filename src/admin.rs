@@ -10,6 +10,8 @@ use near_sdk::{env, log, near_bindgen, AccountId, Gas, NearToken, PromiseResult}
 
 #[near_bindgen]
 impl ShedaContract {
+
+    #[payable]
     pub fn add_admin(&mut self, new_admin_id: AccountId) {
         //check caller is an admin
         assert!(
@@ -20,6 +22,7 @@ impl ShedaContract {
         log!("Admin {} added", new_admin_id);
     }
 
+    #[payable]
     pub fn remove_admin(&mut self, admin_id: AccountId) {
         //check caller is the owner
         assert_eq!(
@@ -36,15 +39,13 @@ impl ShedaContract {
     }
 
     pub fn get_admins(&self) -> Vec<AccountId> {
-        assert!(
-            self.is_admin(env::signer_account_id()),
-            "UnauthorizedAccess"
-        );
+        
         log!("Admin {}", env::signer_account_id());
         self.admins.iter().cloned().collect()
     }
 
     #[handle_result]
+    #[payable]
     pub fn resolve_dispute(&mut self, lease_id: u64) -> Result<(), ContractError> {
         let mut lease = self
             .leases
@@ -72,7 +73,9 @@ impl ShedaContract {
         Ok(())
     }
 
-    pub fn get_leases_with_disputes(&self) -> Vec<LeaseView> {
+
+    #[payable]
+    pub fn get_leases_with_disputes(&mut self) -> Vec<LeaseView> {
         assert!(
             self.is_admin(env::signer_account_id()),
             "UnauthorizedAccess"
@@ -207,6 +210,7 @@ impl ShedaContract {
         );
     }
 
+    #[payable]
     pub fn refund_bids(&mut self, property_id: u64) {
         assert!(
             self.is_admin(env::signer_account_id()),

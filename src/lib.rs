@@ -313,24 +313,20 @@ impl ShedaContract {
         internal_cancel_bid(self, property_id, bid_id);
     }
 
-    #[payable]
     pub fn delist_property(&mut self, property_id: u64) {
         //ensure I own the property
 
         internal_delist_property(self, property_id);
     }
 
-    #[payable]
     pub fn delete_property(&mut self, property_id: u64) {
         internal_delete_property(self, property_id);
     }
 
-    #[payable]
     pub fn raise_dispute(&mut self, lease_id: u64) {
         internal_raise_dispute(self, lease_id);
     }
     
-    #[payable]
     pub fn expire_lease(&mut self, lease_id: u64) {
         internal::internal_expire_lease(self, lease_id);
     }

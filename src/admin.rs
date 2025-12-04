@@ -44,13 +44,13 @@ impl ShedaContract {
 
     #[handle_result]
     pub fn resolve_dispute(&mut self, lease_id: u64) -> Result<(), ContractError> {
-        let mut lease: Lease = self
+        let mut lease = self
             .leases
-            .remove(&lease_id)
+            .get(&lease_id)
+            .cloned()
             .ok_or(ContractError::LeaseNotFound)?;
 
         if lease.dispute_status != DisputeStatus::Raised {
-            self.leases.insert(lease_id, lease);
             return Err(ContractError::DisputeAlreadyRaised);
         };
 

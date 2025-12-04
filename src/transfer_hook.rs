@@ -28,6 +28,8 @@ impl Hook<ShedaContract, Nep171Transfer<'_>> for TransferHook {
             storage_usage_after - storage_usage_before
         );
 
+        //check that the token being transferred is not under dispute or leased
+
         r
     }
 }

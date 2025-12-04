@@ -89,6 +89,7 @@ pub enum ContractError {
     UnauthorizedAccess,
     DisputeAlreadyRaised,
     LeaseNotFound,
+    
     // Added for Stablecoin logic
     InvalidPaymentToken,
     IncorrectBidAmount { expected: u128, received: u128 },

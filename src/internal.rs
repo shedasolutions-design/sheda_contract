@@ -145,11 +145,18 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
 
             // Get all remaining bids BEFORE removing the accepted bid
             let remaining_bids = contract.bids.get(&property_id).unwrap_or(&Vec::new()).clone();
+            let mut unrefunded_bids = Vec::new();
             
             // Refund other bids for the property (all except the accepted one)
             for other_bid in remaining_bids.iter() {
                 if other_bid.id == bid_id {
                     // Skip the accepted bid
+                    continue;
+                }
+
+                // Check if we have enough gas to process the refund (approx 40 TGas per refund)
+                if env::used_gas().as_gas() >= env::prepaid_gas().as_gas() - Gas::from_tgas(40).as_gas() {
+                    unrefunded_bids.push(other_bid.clone());
                     continue;
                 }
                 
@@ -171,8 +178,12 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
                 );
             }
 
-            // Remove all bids for this property
-            contract.bids.remove(&property_id);
+            // Remove all bids for this property if all refunded, otherwise keep unrefunded ones
+            if unrefunded_bids.is_empty() {
+                contract.bids.remove(&property_id);
+            } else {
+                contract.bids.insert(property_id, unrefunded_bids);
+            }
 
             //lease or mark as sold
             match bid.action {
@@ -293,6 +304,20 @@ pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_i
         bid.property_id, property_id,
         "Bid is not for the specified property"
     );
+
+    //ensure my bid was not accepted yet
+    let property = contract.properties.get(&property_id).expect("Property does not exist");
+    
+    if let Some(sold) = &property.sold {
+        if sold.buyer_id == bid.bidder {
+             env::panic_str("Cannot cancel bid: property already sold to you");
+        }
+    }
+    if let Some(lease) = &property.active_lease {
+        if lease.tenant_id == bid.bidder && lease.active {
+             env::panic_str("Cannot cancel bid: property already leased to you");
+        }
+    }
 
     // Refund stablecoin to bidder
     #[allow(unused_must_use)]

@@ -169,6 +169,7 @@ impl ShedaContract {
         this
     }
 
+    #[private]
     #[payable]
     pub fn burn_nft(&mut self, token_id: TokenId) {
         assert_one_yocto();

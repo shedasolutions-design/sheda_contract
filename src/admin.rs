@@ -1,9 +1,10 @@
 pub use crate::ext::*;
+use crate::internal::*;
 use crate::models::*;
 use crate::views::LeaseView;
 use crate::{models::ContractError, ShedaContract, ShedaContractExt};
 use near_sdk::json_types::U128;
-use near_sdk::{AccountId, Gas, NearToken, env, log, near_bindgen};
+use near_sdk::{env, log, near_bindgen, AccountId, Gas, NearToken};
 
 #[near_bindgen]
 impl ShedaContract {
@@ -128,9 +129,7 @@ impl ShedaContract {
             );
         }
     }
-    
 
-    
     pub fn remove_supported_stablecoin(&mut self, token_account: AccountId) {
         assert_eq!(
             env::signer_account_id(),
@@ -187,7 +186,7 @@ impl ShedaContract {
             let amount = bid.amount;
             //cross contract call to transfer stablecoin back to bidder
             #[allow(unused_must_use)]
-            ft_contract::ext(env::signer_account_id())
+            ft_contract::ext(bid.stablecoin_token.clone())
                 .with_attached_deposit(NearToken::from_yoctonear(1))
                 .with_static_gas(Gas::from_tgas(30))
                 .ft_transfer(bidder.clone(), U128(amount));
@@ -208,7 +207,7 @@ impl ShedaContract {
         }
     }
 
-    pub fn delist_property(&mut self, property_id: u64) {
+    pub fn admin_delist_property(&mut self, property_id: u64) {
         assert!(
             self.is_admin(env::signer_account_id()),
             "UnauthorizedAccess"
@@ -219,11 +218,10 @@ impl ShedaContract {
             .get(&property_id)
             .expect("Property not found")
             .clone();
+        assert!(!property.is_for_sale, "Property is currently for sale");
         assert!(
-            !property.is_for_sale, "Property is currently for sale"
-        );
-        assert!(
-            property.active_lease.is_none(), "Property is currently leased"
+            property.active_lease.is_none(),
+            "Property is currently leased"
         );
 
         assert!(
@@ -241,6 +239,46 @@ impl ShedaContract {
             "Property {} delisted by admin {}",
             property_id,
             env::signer_account_id()
+        );
+    }
+
+    pub fn admin_delete_property(&mut self, property_id: u64) {
+        assert!(
+            self.is_admin(env::signer_account_id()),
+            "UnauthorizedAccess"
+        );
+        let property = self
+            .properties
+            .get(&property_id)
+            .expect("Property not found")
+            .clone();
+
+        assert!(
+            property.active_lease.is_none(),
+            "Cannot delete a property with an active lease"
+        );
+
+        assert!(property.sold.is_none(), "Cannot delete a sold property");
+
+        assert!(
+            self.bids.get(&property_id.clone()).is_none(),
+            "Cannot delete property with active bids"
+        );
+
+        self.properties.remove(&property_id.clone());
+        log!(
+            "Property {} deleted by admin {}",
+            property_id,
+            env::signer_account_id()
+        );
+
+        //burn the NFT
+        self.token.internal_transfer(
+            &property.owner_id,
+            &get_burn_account_id(),
+            &property_id.to_string(),
+            None,
+            None,
         );
     }
 }

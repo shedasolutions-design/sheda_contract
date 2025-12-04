@@ -1,6 +1,6 @@
 use crate::models::*;
 use crate::{ShedaContract, ShedaContractExt};
-use near_sdk::{near_bindgen, AccountId};
+use near_sdk::{env, near_bindgen, AccountId};
 use schemars::JsonSchema;
 
 /// View structs for JSON serialization - separate from internal models
@@ -42,6 +42,8 @@ pub struct BidView {
     pub property_id: u64,
     pub bid_amount: String, // u128 as string for JSON
     pub created_at: u64,
+    pub action: Action,
+    pub stablecoin_token: String,
 }
 
 /// Conversion functions from internal models to view structs
@@ -83,7 +85,7 @@ impl From<&Property> for PropertyView {
             metadata_uri: property.metadata_uri.clone(),
             is_for_sale: property.is_for_sale,
             price: property.price.to_string(),
-            lease_duration_nanos: property.lease_duration_nanos,
+            lease_duration_nanos: property.lease_duration_months,
             damage_escrow: property.damage_escrow.to_string(),
             active_lease: property.active_lease.as_ref().map(|lease| lease.into()),
         }
@@ -98,6 +100,8 @@ impl From<&Bid> for BidView {
             property_id: bid.property_id,
             bid_amount: bid.amount.to_string(),
             created_at: bid.created_at,
+            action: bid.action.clone(),
+            stablecoin_token: bid.stablecoin_token.to_string(),
         }
     }
 }
@@ -177,5 +181,22 @@ impl ShedaContract {
     pub fn get_stablecoin_balance(&self, token_account: AccountId) -> String {
         let balance = self.stable_coin_balances.get(&token_account).unwrap_or(&0);
         balance.to_string()
+    }
+
+    //NOTE Poperty Owner specific
+    pub fn get_my_properties(&self) -> Vec<PropertyView> {
+        let caller = env::signer_account_id();
+        self.get_property_by_owner(caller)
+    }
+
+    pub fn get_bids_on_my_property(&self) -> Vec<BidView> {
+        let caller = env::signer_account_id();
+        let properties = self.get_property_by_owner(caller);
+        let mut bids = Vec::new();
+        for property in properties {
+            let property_bids = self.get_bids_for_property(property.id);
+            bids.extend(property_bids);
+        }
+        bids
     }
 }

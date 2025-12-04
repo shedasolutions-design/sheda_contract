@@ -15,7 +15,7 @@ pub enum DisputeStatus {
     Resolved,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone,)]
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
 pub struct Property {
     pub id: u64,
     pub owner_id: AccountId,
@@ -24,16 +24,15 @@ pub struct Property {
     pub is_for_sale: bool,
     // Price in Stablecoin Atomic Units (e.g., 6 decimals for USDC)
     pub price: u128,
-    pub lease_duration_nanos: Option<u64>, //None if not for lease
-    pub damage_escrow: u128,               // Amount held for damages
+    pub lease_duration_months: Option<u64>, //None if not for lease
+    pub damage_escrow: u128,                // Amount held for damages
     pub active_lease: Option<Lease>,
     pub timestamp: Timestamp,
-    pub sold:Option<Sold>,
-
+    pub sold: Option<Sold>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
-pub struct Sold{
+pub struct Sold {
     pub property_id: u64,
     pub buyer_id: AccountId,
     pub amount: u128,
@@ -48,12 +47,23 @@ pub struct Bid {
     pub property_id: u64,
     pub amount: u128,
     pub created_at: Timestamp,
+    pub action: Action,
+    pub stablecoin_token: AccountId,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
 #[serde(crate = "near_sdk::serde")]
 pub struct BidAction {
     pub property_id: u64,
+    pub action: Action,
+    pub stablecoin_token: AccountId,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone, JsonSchema)]
+#[serde(crate = "near_sdk::serde")]
+pub enum Action {
+    Purchase,
+    Lease,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone, JsonSchema)]
@@ -81,6 +91,7 @@ pub enum ContractError {
     LeaseNotFound,
     // Added for Stablecoin logic
     InvalidPaymentToken,
+    IncorrectBidAmount { expected: u128, received: u128 },
 }
 
 impl std::fmt::Display for ContractError {
@@ -94,6 +105,11 @@ impl std::fmt::Display for ContractError {
             ContractError::DisputeAlreadyRaised => write!(f, "Dispute already raised"),
             ContractError::LeaseNotFound => write!(f, "Lease not found"),
             ContractError::InvalidPaymentToken => write!(f, "Invalid payment token"),
+            ContractError::IncorrectBidAmount { expected, received } => write!(
+                f,
+                "Incorrect bid amount: expected {}, received {}",
+                expected, received
+            ),
         }
     }
 }
@@ -111,6 +127,7 @@ impl AsRef<str> for ContractError {
             ContractError::DisputeAlreadyRaised => "DisputeAlreadyRaised",
             ContractError::LeaseNotFound => "LeaseNotFound",
             ContractError::InvalidPaymentToken => "InvalidPaymentToken",
+            ContractError::IncorrectBidAmount { .. } => "IncorrectBidAmount",
         }
     }
 }
@@ -150,6 +167,8 @@ pub struct BidView {
     pub property_id: u64,
     pub bid_amount: u128,
     pub created_at: Timestamp,
+    pub action: Action,
+    pub stablecoin_token: String,
 }
 
 impl Property {
@@ -161,11 +180,11 @@ impl Property {
             metadata_uri: self.metadata_uri.clone(),
             is_for_sale: self.is_for_sale,
             price: self.price,
-            lease_duration_nanos: self.lease_duration_nanos,
+            lease_duration_nanos: self.lease_duration_months,
             damage_escrow: self.damage_escrow,
             active_lease: self.active_lease.as_ref().map(|l| l.to_view()),
             timestamp: self.timestamp,
-            sold: self.sold.as_ref().map(|s| s.to_view()),  
+            sold: self.sold.as_ref().map(|s| s.to_view()),
         }
     }
 }
@@ -194,7 +213,7 @@ pub struct SoldView {
     pub sold_at: Timestamp,
 }
 
-impl Sold{
+impl Sold {
     pub fn to_view(&self) -> SoldView {
         SoldView {
             property_id: self.property_id,

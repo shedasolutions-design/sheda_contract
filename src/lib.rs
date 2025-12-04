@@ -4,9 +4,11 @@ pub mod events;
 pub mod internal;
 pub mod models;
 pub mod views;
-use crate::internal::*;
+pub mod transfer_hook;
+pub mod ext;
 #[allow(unused_imports)]
 use crate::models::{Bid, ContractError, DisputeStatus, Lease, Property};
+use crate::{internal::*, models::Action};
 #[allow(unused_imports)]
 use near_contract_standards::non_fungible_token::{
     metadata::{NFTContractMetadata, TokenMetadata},
@@ -14,19 +16,18 @@ use near_contract_standards::non_fungible_token::{
 };
 
 use near_sdk::{
-    collections::LazyOption,
-    env,
-    json_types::U128,
-    near,
-    store::{IterableMap, IterableSet},
-    AccountId, Gas, NearToken,
+    AccountId, assert_one_yocto, collections::LazyOption, env, json_types::U128, near, require, store::{IterableMap, IterableSet}
 };
-
-pub mod ext;
+#[allow(unused_imports)]
+use near_sdk_contract_tools::{Owner, nft::*, owner::*};
+use crate::transfer_hook::TransferHook;
 pub use crate::ext::*;
 
 pub type TokenId = String;
 // Define the contract structure
+
+#[derive( Owner, NonFungibleToken)]
+#[non_fungible_token(transfer_hook = "TransferHook")]
 #[near(contract_state)]
 pub struct ShedaContract {
     pub token: NonFungibleToken,
@@ -102,10 +103,7 @@ impl Default for ShedaContract {
 impl ShedaContract {
     //set required init parameters here
     #[init]
-    pub fn new(
-        media_url: String,
-        supported_stablecoins: Vec<AccountId>,
-    ) -> Self {
+    pub fn new(media_url: String, supported_stablecoins: Vec<AccountId>) -> Self {
         assert!(!env::state_exists(), "Contract is already initialized");
 
         // Start from Default
@@ -125,14 +123,14 @@ impl ShedaContract {
     }
 
     #[payable]
-    pub fn list_property(
+    pub fn mint_property(
         &mut self,
         title: String,
         description: String,
         media_uri: String, // IPFS link to image
         price: u128,
         is_for_sale: bool,
-        lease_duration_nanos: Option<u64>,
+        lease_duration_months: Option<u64>,
     ) -> u64 {
         // 1. Calculate IDs
         let property_id = self.property_counter;
@@ -163,7 +161,7 @@ impl ShedaContract {
             metadata_uri: media_uri,
             is_for_sale,
             price,
-            lease_duration_nanos,
+            lease_duration_months,
             damage_escrow: 0, // Starts at 0 until leased
             active_lease: None,
             timestamp: env::block_timestamp(),
@@ -177,9 +175,11 @@ impl ShedaContract {
         property_id
     }
 
+    //NOTE Placing a Bid
+    #[payable]
     #[private]
     pub fn ft_on_transfer(&mut self, sender_id: AccountId, amount: U128, msg: String) -> U128 {
-        let bid_action =
+        let bid_action: models::BidAction =
             serde_json::from_str::<models::BidAction>(&msg).expect("Invalid BidAction");
         let property_id = bid_action.property_id;
 
@@ -190,14 +190,32 @@ impl ShedaContract {
 
         // Check if the amount matches the price for sale or lease
         let expected_amount = property.price;
-        if amount.0 != expected_amount {
-            // Refund the full amount
-            #[allow(unused_must_use)]
-            ft_contract::ext(env::predecessor_account_id())
-                .with_attached_deposit(NearToken::from_yoctonear(1))
-                .with_static_gas(Gas::from_tgas(30))
-                .ft_transfer(sender_id, U128(amount.0));
-            return U128(0);
+
+        require!(
+            self.accepted_stablecoin
+                .contains(&env::predecessor_account_id()),
+            "StablecoinNotAccepted"
+        );
+
+        require!(
+            amount.0 == expected_amount,
+            format!(
+                "IncorrectBidAmount: expected {}, received {}",
+                expected_amount, amount.0
+            )
+        );
+
+        //assert the property is fo sale if action is sales and for lease if action is lease
+        match bid_action.action {
+            Action::Purchase => {
+                assert!(property.is_for_sale, "Property is not for sale");
+            }
+            Action::Lease => {
+                assert!(
+                    property.lease_duration_months.is_some(),
+                    "Property is not for lease"
+                );
+            }
         }
 
         // Amount matches, create the bid
@@ -212,22 +230,52 @@ impl ShedaContract {
             bidder: sender_id,
             amount: amount.0,
             created_at: env::block_timestamp(),
+            action: bid_action.action.clone(),
+            stablecoin_token: env::predecessor_account_id(),
         };
 
         // Insert the bid into the bids map
         self.bids.entry(property_id).or_insert(Vec::new()).push(bid);
+        
         //update stablecoin balance
-        let current_balance = self
+        let current_balance = *self
             .stable_coin_balances
-            .remove(&env::predecessor_account_id())
-            .unwrap_or(0);
-        self.stable_coin_balances.insert(
-            env::predecessor_account_id(),
-            current_balance + amount.0,
-        );
+            .get(&env::predecessor_account_id())
+            .unwrap_or(&0);
 
-        // Return the bid ID
+        self.stable_coin_balances
+            .insert(env::predecessor_account_id(), current_balance + amount.0);
+
+        // Returning 0 means: keep all tokens, no refund
         U128(0)
+    }
+
+    #[payable]
+    pub fn accept_bid(&mut self, bid_id: u64, property_id: u64) {
+        internal_accept_bid(self, property_id, bid_id);
+    }
+
+    #[payable]
+    pub fn reject_bid(&mut self, bid_id: u64, property_id: u64) {
+        internal_reject_bid(self, property_id, bid_id);
+    }
+
+    #[payable]
+    pub fn cancel_bid(&mut self, bid_id: u64, property_id: u64) {
+        internal_cancel_bid(self, property_id, bid_id);
+    }
+
+    #[payable]
+    pub fn delist_property(&mut self, property_id: u64) {
+        //ensure I own the property
+
+        internal_delist_property(self, property_id);
+    }
+
+    #[payable]
+    pub fn delete_property(&mut self, property_id: u64) {
+        assert_one_yocto();
+        internal_delete_property(self, property_id);
     }
 }
 

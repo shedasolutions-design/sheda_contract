@@ -5,6 +5,9 @@ use schemars::JsonSchema;
 
 /// View structs for JSON serialization - separate from internal models
 
+// Default pagination limit for view methods
+const DEFAULT_PAGINATION_LIMIT: u64 = 100;
+
 #[derive(serde::Serialize, serde::Deserialize, JsonSchema)]
 pub struct DisputeStatusView {
     pub status: String,
@@ -199,5 +202,48 @@ impl ShedaContract {
             bids.extend(property_bids);
         }
         bids
+    }
+
+    // Paginated view to get all bids
+    pub fn get_all_bids(&self, from_index: u64, limit: u64) -> Vec<BidView> {
+        self.bids
+            .iter()
+            .flat_map(|(_property_id, bids)| bids.iter())
+            .skip(from_index as usize)
+            .take(limit as usize)
+            .map(|bid| bid.into())
+            .collect()
+    }
+
+    // Paginated view to get bids for a specific property
+    pub fn get_bids_for_property_paginated(&self, property_id: u64, from_index: u64, limit: u64) -> Vec<BidView> {
+        self.bids
+            .get(&property_id)
+            .map(|bids| {
+                bids.iter()
+                    .skip(from_index as usize)
+                    .take(limit as usize)
+                    .map(|bid| bid.into())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    // Paginated view to get bids by a specific bidder
+    pub fn get_bids_by_bidder(&self, bidder: AccountId, from_index: u64, limit: u64) -> Vec<BidView> {
+        self.bids
+            .iter()
+            .flat_map(|(_property_id, bids)| bids.iter())
+            .filter(|bid| bid.bidder == bidder)
+            .skip(from_index as usize)
+            .take(limit as usize)
+            .map(|bid| bid.into())
+            .collect()
+    }
+
+    // Get my bids (bids I've made)
+    pub fn get_my_bids(&self) -> Vec<BidView> {
+        let caller = env::signer_account_id();
+        self.get_bids_by_bidder(caller, 0, DEFAULT_PAGINATION_LIMIT)
     }
 }

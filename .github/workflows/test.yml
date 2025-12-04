@@ -32,3 +32,5 @@ jobs:
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.17.0/cargo-near-installer.sh | sh
       - name: Run cargo test
         run: cargo test
+      - name: Test Build 
+        run: cargo build --target wasm-unknown-unknown

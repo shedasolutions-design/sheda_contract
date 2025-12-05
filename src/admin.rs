@@ -15,8 +15,8 @@ impl ShedaContract {
     pub fn add_admin(&mut self, new_admin_id: AccountId) {
         //check caller is an admin
         assert!(
-            !self.admins.contains(&env::signer_account_id()),
-            "Admin already exists"
+            self.admins.contains(&env::signer_account_id()),
+            "account is not an admin"
         );
         self.admins.insert(new_admin_id.clone());
         log!("Admin {} added", new_admin_id);

@@ -328,6 +328,7 @@ impl ShedaContract {
         internal_delist_property(self, property_id);
     }
 
+    #[payable]
     pub fn delete_property(&mut self, property_id: u64) {
         internal_delete_property(self, property_id);
     }

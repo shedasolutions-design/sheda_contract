@@ -82,6 +82,7 @@ impl ShedaContract {
             .collect()
     }
 
+    #[payable]
     pub fn add_supported_stablecoin(&mut self, token_account: AccountId) {
         assert_eq!(
             env::signer_account_id(),
@@ -291,6 +292,7 @@ impl ShedaContract {
         );
     }
 
+    #[payable]
     pub fn admin_delete_property(&mut self, property_id: u64) {
         assert!(
             self.is_admin(env::signer_account_id()),
@@ -325,6 +327,7 @@ impl ShedaContract {
         crate::internal::burn_nft(self, property_id.to_string());
     }
 
+    #[payable]
     pub fn admin_change_nft_metadata(&mut self, image_url: String, name: String, symbol:String) {
         assert!(
             self.is_admin(env::signer_account_id()),

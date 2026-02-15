@@ -106,6 +106,10 @@ For purchase/lease flows that require document exchange and escrow release, use 
 **Disputes:**
 Either party can call `raise_dispute(bid_id, property_id, reason)` while the bid is `Accepted`, `DocsReleased`, or `DocsConfirmed`.
 
+### Integration Notes
+- The `document_token_id` is expected to reference an agreement NFT minted off-chain or by a supporting contract. The backend can store document metadata and links, while this contract only stores the token id.
+- Escrow remains locked until the buyer calls `release_escrow`, so client apps should surface this step explicitly after document confirmation.
+
 ## Available Methods
 
 ### Initialization

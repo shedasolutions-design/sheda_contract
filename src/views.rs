@@ -45,6 +45,10 @@ pub struct BidView {
     pub property_id: u64,
     pub bid_amount: String, // u128 as string for JSON
     pub created_at: u64,
+    pub updated_at: u64,
+    pub status: BidStatus,
+    pub document_token_id: Option<String>,
+    pub escrow_release_tx: Option<String>,
     pub action: Action,
     pub stablecoin_token: String,
 }
@@ -104,6 +108,10 @@ impl From<&Bid> for BidView {
             property_id: bid.property_id,
             bid_amount: bid.amount.to_string(),
             created_at: bid.created_at,
+            updated_at: bid.updated_at,
+            status: bid.status.clone(),
+            document_token_id: bid.document_token_id.clone(),
+            escrow_release_tx: bid.escrow_release_tx.clone(),
             action: bid.action.clone(),
             stablecoin_token: bid.stablecoin_token.to_string(),
         }

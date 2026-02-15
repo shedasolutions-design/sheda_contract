@@ -16,6 +16,21 @@ pub enum DisputeStatus {
     PendingTenantResponse,
 }
 
+#[derive(
+    BorshDeserialize, BorshSerialize, Deserialize, Serialize, PartialEq, Debug, Clone, JsonSchema,
+)]
+pub enum BidStatus {
+    Pending,
+    Accepted,
+    Rejected,
+    Cancelled,
+    DocsReleased,
+    DocsConfirmed,
+    PaymentReleased,
+    Completed,
+    Disputed,
+}
+
 #[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
 pub struct Property {
     pub id: u64,
@@ -48,6 +63,11 @@ pub struct Bid {
     pub property_id: u64,
     pub amount: u128,
     pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+    pub status: BidStatus,
+    pub document_token_id: Option<String>,
+    pub escrow_release_tx: Option<String>,
+    pub dispute_reason: Option<String>,
     pub action: Action,
     pub stablecoin_token: AccountId,
 }
@@ -169,6 +189,10 @@ pub struct BidView {
     pub property_id: u64,
     pub bid_amount: u128,
     pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+    pub status: BidStatus,
+    pub document_token_id: Option<String>,
+    pub escrow_release_tx: Option<String>,
     pub action: Action,
     pub stablecoin_token: String,
 }

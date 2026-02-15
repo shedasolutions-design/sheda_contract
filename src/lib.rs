@@ -7,7 +7,7 @@ pub mod views;
 
 pub mod ext;
 #[allow(unused_imports)]
-use crate::models::{Bid, ContractError, DisputeStatus, Lease, Property};
+use crate::models::{Bid, BidStatus, ContractError, DisputeStatus, Lease, Property};
 use crate::{internal::*, models::Action};
 
 #[allow(unused_imports)]
@@ -272,6 +272,11 @@ impl ShedaContract {
             bidder: sender_id,
             amount: amount.0,
             created_at: env::block_timestamp(),
+            updated_at: env::block_timestamp(),
+            status: BidStatus::Pending,
+            document_token_id: None,
+            escrow_release_tx: None,
+            dispute_reason: None,
             action: bid_action.action.clone(),
             stablecoin_token: env::predecessor_account_id(),
         };
@@ -295,6 +300,11 @@ impl ShedaContract {
     #[payable]
     pub fn accept_bid(&mut self, bid_id: u64, property_id: u64) -> near_sdk::Promise {
         internal_accept_bid(self, property_id, bid_id)
+    }
+
+    #[payable]
+    pub fn accept_bid_with_escrow(&mut self, bid_id: u64, property_id: u64) -> bool {
+        internal::internal_accept_bid_with_escrow(self, property_id, bid_id)
     }
 
     #[private]
@@ -322,12 +332,42 @@ impl ShedaContract {
         internal_delete_property(self, property_id);
     }
 
-    pub fn raise_dispute(&mut self, lease_id: u64) {
+    pub fn raise_lease_dispute(&mut self, lease_id: u64) {
         internal_raise_dispute(self, lease_id);
+    }
+
+    pub fn raise_dispute(&mut self, bid_id: u64, property_id: u64, reason: String) -> bool {
+        internal::internal_raise_bid_dispute(self, property_id, bid_id, reason)
     }
     
     pub fn expire_lease(&mut self, lease_id: u64) {
         internal::internal_expire_lease(self, lease_id);
+    }
+
+    pub fn confirm_document_release(
+        &mut self,
+        bid_id: u64,
+        property_id: u64,
+        document_token_id: String,
+    ) -> bool {
+        internal::internal_confirm_document_release(self, property_id, bid_id, document_token_id)
+    }
+
+    pub fn confirm_document_receipt(&mut self, bid_id: u64, property_id: u64) -> bool {
+        internal::internal_confirm_document_receipt(self, property_id, bid_id)
+    }
+
+    pub fn release_escrow(&mut self, bid_id: u64, property_id: u64) -> near_sdk::Promise {
+        internal::internal_release_escrow(self, property_id, bid_id)
+    }
+
+    #[private]
+    pub fn release_escrow_callback(&mut self, property_id: u64, bid_id: u64) {
+        internal::release_escrow_callback(self, property_id, bid_id);
+    }
+
+    pub fn complete_transaction(&mut self, bid_id: u64, property_id: u64) -> bool {
+        internal::internal_complete_transaction(self, property_id, bid_id)
     }
 
     // Allow bidders to manually claim/withdraw their bid that was not accepted
@@ -378,7 +418,7 @@ impl ShedaContract {
         self.stable_coin_balances
             .insert(bid.stablecoin_token.clone(), current_balance.saturating_sub(bid.amount));
 
-        // Return promise and handle callback to remove bid only on success
+        // Return promise and handle callback to update bid status only on success
         promise.then(
             Self::ext(env::current_account_id())
                 .with_static_gas(near_sdk::Gas::from_tgas(20))
@@ -390,12 +430,14 @@ impl ShedaContract {
     pub fn claim_lost_bid_callback(&mut self, bid_id: u64, property_id: u64, stablecoin_token: AccountId, amount: u128) {
         match env::promise_result(0) {
             near_sdk::PromiseResult::Successful(_) => {
-                // Remove the bid only if transfer succeeded
-                self.bids
-                    .get_mut(&property_id)
-                    .map(|bids| bids.retain(|b| b.id != bid_id));
+                if let Some(bids) = self.bids.get_mut(&property_id) {
+                    let _ = internal::update_bid_in_list(bids, bid_id, |bid| {
+                        bid.status = crate::models::BidStatus::Cancelled;
+                        bid.updated_at = env::block_timestamp();
+                    });
+                }
 
-                near_sdk::log!("Bid {} claimed successfully", bid_id);
+                near_sdk::log!("Bid {} claimed and marked cancelled", bid_id);
             }
             near_sdk::PromiseResult::Failed => {
                 // Revert the balance update if transfer failed

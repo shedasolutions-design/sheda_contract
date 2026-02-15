@@ -11,6 +11,7 @@ Sheda Contract is a NEAR Protocol smart contract designed for a decentralized pr
   - [3. Bidding & Purchasing (ft_on_transfer)](#3-bidding--purchasing-ft_on_transfer)
   - [4. Accepting Bids](#4-accepting-bids)
   - [5. Leasing & Disputes](#5-leasing--disputes)
+  - [6. Transaction Lifecycle (Escrow + Docs)](#6-transaction-lifecycle-escrow--docs)
 - [Available Methods](#available-methods)
   - [Initialization](#initialization)
   - [Property Actions](#property-actions)
@@ -85,6 +86,26 @@ If a bid is for a lease:
 -   Admins can `resolve_dispute(lease_id)`.
 -   Once the duration passes, `expire_lease(lease_id)` can be called.
 
+### 6. Transaction Lifecycle (Escrow + Docs)
+For purchase/lease flows that require document exchange and escrow release, use the new lifecycle methods below instead of `accept_bid`. This keeps funds in escrow until the buyer confirms documents and explicitly releases payment.
+
+**New lifecycle states on Bid:**
+`Pending` → `Accepted` → `DocsReleased` → `DocsConfirmed` → `PaymentReleased` → `Completed`
+
+**Recommended flow:**
+1. Seller calls `accept_bid_with_escrow(bid_id, property_id)` to mark the bid as `Accepted` and refund competing bids.
+2. Seller mints the agreement NFT and transfers it to the buyer, then calls:
+  `confirm_document_release(bid_id, property_id, document_token_id)`.
+3. Buyer reviews the document and calls:
+  `confirm_document_receipt(bid_id, property_id)`.
+4. Buyer releases escrowed funds:
+  `release_escrow(bid_id, property_id)`.
+5. Either party finalizes:
+  `complete_transaction(bid_id, property_id)`.
+
+**Disputes:**
+Either party can call `raise_dispute(bid_id, property_id, reason)` while the bid is `Accepted`, `DocsReleased`, or `DocsConfirmed`.
+
 ## Available Methods
 
 ### Initialization
@@ -98,12 +119,18 @@ If a bid is for a lease:
 ### Bidding Actions
 -   `ft_on_transfer(sender_id, amount, msg)`: **(Called by Stablecoin Contract)** Handles incoming bid deposits.
 -   `accept_bid(bid_id, property_id)`: Owner accepts a bid.
+-   `accept_bid_with_escrow(bid_id, property_id)`: Owner accepts a bid but keeps funds in escrow for the lifecycle flow.
 -   `reject_bid(bid_id, property_id)`: Owner rejects a bid (refunds bidder).
 -   `cancel_bid(bid_id, property_id)`: Bidder cancels their bid (refunds bidder).
 -   `claim_lost_bid(bid_id, property_id)`: Manually claim a refund if a bid was "lost" (e.g., due to gas limits during acceptance).
+-   `confirm_document_release(bid_id, property_id, document_token_id)`: Seller releases the agreement NFT to buyer.
+-   `confirm_document_receipt(bid_id, property_id)`: Buyer confirms receipt of agreement NFT.
+-   `release_escrow(bid_id, property_id)`: Buyer releases escrowed stablecoin to seller.
+-   `complete_transaction(bid_id, property_id)`: Finalize the transaction once escrow is released.
+-   `raise_dispute(bid_id, property_id, reason)`: Raise a dispute for the transaction lifecycle.
 
 ### Leasing Actions
--   `raise_dispute(lease_id)`: Flag a lease for admin review.
+-   `raise_lease_dispute(lease_id)`: Flag a lease for admin review.
 -   `expire_lease(lease_id)`: End a lease after its duration.
 
 ### Admin Actions

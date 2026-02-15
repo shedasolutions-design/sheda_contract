@@ -210,38 +210,49 @@ impl ShedaContract {
             self.is_admin(env::signer_account_id()),
             "UnauthorizedAccess"
         );
-        let bids = self.bids.remove(&property_id).unwrap_or_default();
-        for bid in bids.iter() {
-            let bidder = bid.bidder.clone();
-            let amount = bid.amount;
-            
-            //update stablecoin balance optimistically
-            let current_balance = *self
-                .stable_coin_balances
-                .get(&bid.stablecoin_token)
-                .unwrap_or(&0);
-            self.stable_coin_balances
-                .insert(bid.stablecoin_token.clone(), current_balance.saturating_sub(amount));
+        if let Some(bids) = self.bids.get_mut(&property_id) {
+            for bid in bids.iter_mut() {
+                if bid.status != BidStatus::Pending {
+                    continue;
+                }
 
-            //cross contract call to transfer stablecoin back to bidder
-            #[allow(unused_must_use)]
-            ft_contract::ext(bid.stablecoin_token.clone())
-                .with_attached_deposit(NearToken::from_yoctonear(1))
-                .with_static_gas(Gas::from_tgas(30))
-                .ft_transfer(bidder.clone(), U128(amount))
-                .then(
-                    Self::ext(env::current_account_id())
-                        .with_static_gas(Gas::from_tgas(10))
-                        .withdraw_callback(bid.stablecoin_token.clone(), U128(amount))
+                let bidder = bid.bidder.clone();
+                let amount = bid.amount;
+                let stablecoin_token = bid.stablecoin_token.clone();
+
+                //update stablecoin balance optimistically
+                let current_balance = *self
+                    .stable_coin_balances
+                    .get(&stablecoin_token)
+                    .unwrap_or(&0);
+                self.stable_coin_balances.insert(
+                    stablecoin_token.clone(),
+                    current_balance.saturating_sub(amount),
                 );
 
-            log!(
-                "Refunded {} to bidder {} for property {} by admin {}",
-                amount,
-                bidder,
-                property_id,
-                env::signer_account_id()
-            );
+                //cross contract call to transfer stablecoin back to bidder
+                #[allow(unused_must_use)]
+                ft_contract::ext(stablecoin_token.clone())
+                    .with_attached_deposit(NearToken::from_yoctonear(1))
+                    .with_static_gas(Gas::from_tgas(30))
+                    .ft_transfer(bidder.clone(), U128(amount))
+                    .then(
+                        Self::ext(env::current_account_id())
+                            .with_static_gas(Gas::from_tgas(10))
+                            .withdraw_callback(stablecoin_token.clone(), U128(amount))
+                    );
+
+                bid.status = BidStatus::Cancelled;
+                bid.updated_at = env::block_timestamp();
+
+                log!(
+                    "Refunded {} to bidder {} for property {} by admin {}",
+                    amount,
+                    bidder,
+                    property_id,
+                    env::signer_account_id()
+                );
+            }
         }
     }
 

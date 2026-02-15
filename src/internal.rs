@@ -3,9 +3,29 @@ use near_sdk::{assert_one_yocto, env, json_types::U128, log, require, Gas, NearT
 
 use crate::{
     ext::ft_contract,
-    models::{Action, Bid},
+    models::{Action, Bid, BidStatus},
     ShedaContract,
 };
+
+pub(crate) fn update_bid_in_list<F>(bids: &mut Vec<Bid>, bid_id: u64, update: F) -> Bid
+where
+    F: FnOnce(&mut Bid),
+{
+    let index = bids
+        .iter()
+        .position(|bid| bid.id == bid_id)
+        .expect("Bid not found for the property");
+    let bid = bids.get_mut(index).expect("Bid not found for the property");
+    update(bid);
+    bid.clone()
+}
+
+fn get_bid_from_list(bids: &Vec<Bid>, bid_id: u64) -> Bid {
+    bids.iter()
+        .find(|bid| bid.id == bid_id)
+        .expect("Bid not found for the property")
+        .clone()
+}
 
 pub fn extract_base_uri(url: &str) -> String {
     if let Some(cid) = url.split("/ipfs/").nth(1) {
@@ -67,14 +87,6 @@ pub fn burn_nft(contract: &mut ShedaContract, token_id: String) {
 }
 
 pub fn internal_accept_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) -> Promise {
-    let bid = {
-        let bids: &Vec<Bid> = contract.bids.get(&property_id).expect("Bid does not exist");
-        bids.into_iter()
-            .find(|b| b.id == bid_id)
-            .expect("Bid not found for the property")
-            .clone()
-    };
-
     let property = contract
         .properties
         .get(&property_id)
@@ -85,6 +97,20 @@ pub fn internal_accept_bid(contract: &mut ShedaContract, property_id: u64, bid_i
         env::predecessor_account_id(),
         "Only the property owner can accept bids"
     );
+
+    let bid = {
+        let bids = contract
+            .bids
+            .get_mut(&property_id)
+            .expect("Bid does not exist");
+        update_bid_in_list(bids, bid_id, |bid| {
+            if bid.status != BidStatus::Pending {
+                env::panic_str("Bid is not in a pending state");
+            }
+            bid.status = BidStatus::Accepted;
+            bid.updated_at = env::block_timestamp();
+        })
+    };
 
     assert_eq!(
         bid.property_id, property_id,
@@ -119,20 +145,20 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
     // Check if the promise succeeded
     match env::promise_result(0) {
         PromiseResult::Successful(_) => {
-            log!("ft_transfer successful, proceeding with NFT transfer and bid removal");
-
-            let bid = {
-                let bids: &Vec<Bid> = contract.bids.get(&property_id).expect("Bid does not exist");
-                bids.into_iter()
-                    .find(|b| b.id == bid_id)
-                    .expect("Bid not found for the property")
-                    .clone()
-            };
+            log!("ft_transfer successful, proceeding with NFT transfer and bid updates");
 
             let property = contract
                 .properties
                 .get(&property_id)
                 .expect("Property does not exist");
+
+            let bid = {
+                let bids = contract
+                    .bids
+                    .get(&property_id)
+                    .expect("Bid does not exist");
+                get_bid_from_list(bids, bid_id)
+            };
 
             // Transfer NFT to bidder
             contract.tokens.internal_transfer(
@@ -143,49 +169,45 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
                 None,
             );
 
-            // Get all remaining bids BEFORE removing the accepted bid
-            let remaining_bids = contract.bids.get(&property_id).unwrap_or(&Vec::new()).clone();
-            let mut unrefunded_bids = Vec::new();
-            
-            // Refund other bids for the property (all except the accepted one)
-            for other_bid in remaining_bids.iter() {
-                if other_bid.id == bid_id {
-                    // Skip the accepted bid
-                    continue;
-                }
+            if let Some(bids) = contract.bids.get_mut(&property_id) {
+                for other_bid in bids.iter_mut() {
+                    if other_bid.id == bid_id {
+                        other_bid.status = BidStatus::Completed;
+                        other_bid.updated_at = env::block_timestamp();
+                        other_bid.escrow_release_tx = Some(format!("block:{}", env::block_height()));
+                        continue;
+                    }
 
-                // Check if we have enough gas to process the refund (approx 40 TGas per refund)
-                if env::used_gas().as_gas() >= env::prepaid_gas().as_gas() - Gas::from_tgas(40).as_gas() {
-                    unrefunded_bids.push(other_bid.clone());
-                    continue;
-                }
-                
-                // Refund stablecoin to other bidders
-                #[allow(unused_must_use)]
-                ft_contract::ext(other_bid.stablecoin_token.clone())
-                    .with_attached_deposit(NearToken::from_yoctonear(1))
-                    .with_static_gas(Gas::from_tgas(30))
-                    .ft_transfer(other_bid.bidder.clone(), U128(other_bid.amount));
+                    if other_bid.status != BidStatus::Pending {
+                        continue;
+                    }
 
-                // Update stablecoin balance for refunds
-                let current_balance = *contract
-                    .stable_coin_balances
-                    .get(&other_bid.stablecoin_token)
-                    .unwrap_or(&0);
-                contract.stable_coin_balances.insert(
-                    other_bid.stablecoin_token.clone(),
-                    current_balance.saturating_sub(other_bid.amount),
-                );
+                    if env::used_gas().as_gas()
+                        >= env::prepaid_gas().as_gas() - Gas::from_tgas(40).as_gas()
+                    {
+                        continue;
+                    }
+
+                    #[allow(unused_must_use)]
+                    ft_contract::ext(other_bid.stablecoin_token.clone())
+                        .with_attached_deposit(NearToken::from_yoctonear(1))
+                        .with_static_gas(Gas::from_tgas(30))
+                        .ft_transfer(other_bid.bidder.clone(), U128(other_bid.amount));
+
+                    let current_balance = *contract
+                        .stable_coin_balances
+                        .get(&other_bid.stablecoin_token)
+                        .unwrap_or(&0);
+                    contract.stable_coin_balances.insert(
+                        other_bid.stablecoin_token.clone(),
+                        current_balance.saturating_sub(other_bid.amount),
+                    );
+
+                    other_bid.status = BidStatus::Rejected;
+                    other_bid.updated_at = env::block_timestamp();
+                }
             }
 
-            // Remove all bids for this property if all refunded, otherwise keep unrefunded ones
-            if unrefunded_bids.is_empty() {
-                contract.bids.remove(&property_id);
-            } else {
-                contract.bids.insert(property_id, unrefunded_bids);
-            }
-
-            //lease or mark as sold
             match bid.action {
                 Action::Purchase => {
                     let mut updated_property = property.clone();
@@ -201,7 +223,7 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
                 }
                 Action::Lease => {
                     let mut updated_property = property.clone();
-                    updated_property.active_lease = Some(crate::models::Lease {
+                    let lease = crate::models::Lease {
                         id: contract.lease_counter,
                         property_id,
                         tenant_id: bid.bidder.clone(),
@@ -211,7 +233,9 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
                         active: true,
                         dispute_status: crate::models::DisputeStatus::None,
                         escrow_held: bid.amount,
-                    });
+                    };
+                    updated_property.active_lease = Some(lease.clone());
+                    contract.leases.insert(lease.id, lease);
                     contract.lease_counter += 1;
                     contract.properties.insert(property_id, updated_property);
                 }
@@ -223,10 +247,7 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
             // Revert the stablecoin balance update
             let bid = {
                 let bids: &Vec<Bid> = contract.bids.get(&property_id).expect("Bid does not exist");
-                bids.into_iter()
-                    .find(|b| b.id == bid_id)
-                    .expect("Bid not found for the property")
-                    .clone()
+                get_bid_from_list(bids, bid_id)
             };
 
             let current_balance = *contract
@@ -237,18 +258,27 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
                 .stable_coin_balances
                 .insert(bid.stablecoin_token.clone(), current_balance + bid.amount);
 
+            if let Some(bids) = contract.bids.get_mut(&property_id) {
+                let _ = update_bid_in_list(bids, bid_id, |bid| {
+                    bid.status = BidStatus::Pending;
+                    bid.updated_at = env::block_timestamp();
+                });
+            }
+
             env::panic_str("Payment transfer failed. Bid acceptance aborted.");
         }
     }
 }
 
 pub fn internal_reject_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) {
-    let bids: &Vec<Bid> = contract.bids.get(&property_id).expect("Bid does not exist");
+    let bid = {
+        let bids: &Vec<Bid> = contract.bids.get(&property_id).expect("Bid does not exist");
+        get_bid_from_list(bids, bid_id)
+    };
 
-    let bid = bids
-        .into_iter()
-        .find(|b| b.id == bid_id)
-        .expect("Bid not found for the property");
+    if bid.status != BidStatus::Pending {
+        env::panic_str("Bid is not in a pending state");
+    }
 
     let property = contract
         .properties
@@ -282,17 +312,26 @@ pub fn internal_reject_bid(contract: &mut ShedaContract, property_id: u64, bid_i
         .stable_coin_balances
         .insert(bid.stablecoin_token.clone(), current_balance.saturating_sub(bid.amount));
 
-    // Remove the bid from storage
-    contract.bids.remove(&bid_id);
+    if let Some(bids) = contract.bids.get_mut(&property_id) {
+        let _ = update_bid_in_list(bids, bid_id, |bid| {
+            if bid.status != BidStatus::Pending {
+                env::panic_str("Bid is not in a pending state");
+            }
+            bid.status = BidStatus::Rejected;
+            bid.updated_at = env::block_timestamp();
+        });
+    }
 }
 
 pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) {
-    let bids: &Vec<Bid> = contract.bids.get(&property_id).expect("Bid does not exist");
+    let bid = {
+        let bids: &Vec<Bid> = contract.bids.get(&property_id).expect("Bid does not exist");
+        get_bid_from_list(bids, bid_id)
+    };
 
-    let bid = bids
-        .into_iter()
-        .find(|b| b.id == bid_id)
-        .expect("Bid not found for the property");
+    if bid.status != BidStatus::Pending {
+        env::panic_str("Bid is not in a pending state");
+    }
 
     assert_eq!(
         bid.bidder,
@@ -335,8 +374,347 @@ pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_i
         .stable_coin_balances
         .insert(bid.stablecoin_token.clone(), current_balance.saturating_sub(bid.amount));
 
-    // Remove the bid from storage
-    contract.bids.remove(&bid_id);
+    if let Some(bids) = contract.bids.get_mut(&property_id) {
+        let _ = update_bid_in_list(bids, bid_id, |bid| {
+            if bid.status != BidStatus::Pending {
+                env::panic_str("Bid is not in a pending state");
+            }
+            bid.status = BidStatus::Cancelled;
+            bid.updated_at = env::block_timestamp();
+        });
+    }
+}
+
+pub fn internal_accept_bid_with_escrow(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+) -> bool {
+    let property = contract
+        .properties
+        .get(&property_id)
+        .expect("Property does not exist");
+
+    assert_eq!(
+        property.owner_id,
+        env::predecessor_account_id(),
+        "Only the property owner can accept bids"
+    );
+
+    let bid = {
+        let bids = contract
+            .bids
+            .get_mut(&property_id)
+            .expect("Bid does not exist");
+        update_bid_in_list(bids, bid_id, |bid| {
+            if bid.status != BidStatus::Pending {
+                env::panic_str("Bid is not in a pending state");
+            }
+            bid.status = BidStatus::Accepted;
+            bid.updated_at = env::block_timestamp();
+        })
+    };
+
+    assert_eq!(
+        bid.property_id, property_id,
+        "Bid is not for the specified property"
+    );
+
+    if let Some(bids) = contract.bids.get_mut(&property_id) {
+        for other_bid in bids.iter_mut() {
+            if other_bid.id == bid_id || other_bid.status != BidStatus::Pending {
+                continue;
+            }
+
+            if env::used_gas().as_gas()
+                >= env::prepaid_gas().as_gas() - Gas::from_tgas(40).as_gas()
+            {
+                continue;
+            }
+
+            #[allow(unused_must_use)]
+            ft_contract::ext(other_bid.stablecoin_token.clone())
+                .with_attached_deposit(NearToken::from_yoctonear(1))
+                .with_static_gas(Gas::from_tgas(30))
+                .ft_transfer(other_bid.bidder.clone(), U128(other_bid.amount));
+
+            let current_balance = *contract
+                .stable_coin_balances
+                .get(&other_bid.stablecoin_token)
+                .unwrap_or(&0);
+            contract.stable_coin_balances.insert(
+                other_bid.stablecoin_token.clone(),
+                current_balance.saturating_sub(other_bid.amount),
+            );
+
+            other_bid.status = BidStatus::Rejected;
+            other_bid.updated_at = env::block_timestamp();
+        }
+    }
+
+    true
+}
+
+pub fn internal_confirm_document_release(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+    document_token_id: String,
+) -> bool {
+    let property = contract
+        .properties
+        .get(&property_id)
+        .expect("Property does not exist");
+
+    assert_eq!(
+        property.owner_id,
+        env::predecessor_account_id(),
+        "Only the property owner can release documents"
+    );
+
+    if let Some(bids) = contract.bids.get_mut(&property_id) {
+        let _ = update_bid_in_list(bids, bid_id, |bid| {
+            if bid.status != BidStatus::Accepted {
+                env::panic_str("Bid is not in an accepted state");
+            }
+            bid.status = BidStatus::DocsReleased;
+            bid.updated_at = env::block_timestamp();
+            bid.document_token_id = Some(document_token_id);
+        });
+    } else {
+        env::panic_str("Bid does not exist");
+    }
+
+    true
+}
+
+pub fn internal_confirm_document_receipt(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+) -> bool {
+    if let Some(bids) = contract.bids.get_mut(&property_id) {
+        let _ = update_bid_in_list(bids, bid_id, |bid| {
+            if bid.status != BidStatus::DocsReleased {
+                env::panic_str("Bid is not in a document released state");
+            }
+            if bid.bidder != env::predecessor_account_id() {
+                env::panic_str("Only the bidder can confirm receipt");
+            }
+            bid.status = BidStatus::DocsConfirmed;
+            bid.updated_at = env::block_timestamp();
+        });
+    } else {
+        env::panic_str("Bid does not exist");
+    }
+
+    true
+}
+
+pub fn internal_release_escrow(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+) -> Promise {
+    let bid = {
+        let bids = contract.bids.get(&property_id).expect("Bid does not exist");
+        get_bid_from_list(bids, bid_id)
+    };
+
+    let property = contract
+        .properties
+        .get(&property_id)
+        .expect("Property does not exist");
+
+    assert_eq!(
+        bid.bidder,
+        env::predecessor_account_id(),
+        "Only the bidder can release escrow"
+    );
+
+    if bid.status != BidStatus::DocsConfirmed {
+        env::panic_str("Bid is not in a document confirmed state");
+    }
+
+    let promise = ft_contract::ext(bid.stablecoin_token.clone())
+        .with_attached_deposit(NearToken::from_yoctonear(1))
+        .with_static_gas(Gas::from_tgas(30))
+        .ft_transfer(property.owner_id.clone(), U128(bid.amount));
+
+    let current_balance = *contract
+        .stable_coin_balances
+        .get(&bid.stablecoin_token)
+        .unwrap_or(&0);
+    contract
+        .stable_coin_balances
+        .insert(bid.stablecoin_token.clone(), current_balance.saturating_sub(bid.amount));
+
+    promise.then(
+        crate::ShedaContract::ext(env::current_account_id())
+            .with_static_gas(Gas::from_tgas(50))
+            .release_escrow_callback(property_id, bid_id),
+    )
+}
+
+pub fn release_escrow_callback(contract: &mut ShedaContract, property_id: u64, bid_id: u64) {
+    match env::promise_result(0) {
+        PromiseResult::Successful(_) => {
+            let property = contract
+                .properties
+                .get(&property_id)
+                .expect("Property does not exist");
+
+            let bid = {
+                let bids = contract.bids.get(&property_id).expect("Bid does not exist");
+                get_bid_from_list(bids, bid_id)
+            };
+
+            if let Some(bids) = contract.bids.get_mut(&property_id) {
+                let _ = update_bid_in_list(bids, bid_id, |bid| {
+                    bid.status = BidStatus::PaymentReleased;
+                    bid.updated_at = env::block_timestamp();
+                    bid.escrow_release_tx = Some(format!("block:{}", env::block_height()));
+                });
+            }
+
+            match bid.action {
+                Action::Purchase => {
+                    contract.tokens.internal_transfer(
+                        &property.owner_id,
+                        &bid.bidder,
+                        &property_id.to_string(),
+                        None,
+                        None,
+                    );
+
+                    let mut updated_property = property.clone();
+                    updated_property.sold = Some(crate::models::Sold {
+                        property_id,
+                        buyer_id: bid.bidder.clone(),
+                        amount: bid.amount,
+                        previous_owner_id: property.owner_id.clone(),
+                        sold_at: env::block_timestamp(),
+                    });
+                    updated_property.is_for_sale = false;
+                    contract.properties.insert(property_id, updated_property);
+                }
+                Action::Lease => {
+                    contract.tokens.internal_transfer(
+                        &property.owner_id,
+                        &bid.bidder,
+                        &property_id.to_string(),
+                        None,
+                        None,
+                    );
+
+                    let mut updated_property = property.clone();
+                    let lease = crate::models::Lease {
+                        id: contract.lease_counter,
+                        property_id,
+                        tenant_id: bid.bidder.clone(),
+                        start_time: env::block_timestamp(),
+                        end_time: env::block_timestamp()
+                            + property.lease_duration_months.unwrap() * 30 * 24 * 60 * 60 * 1_000_000_000,
+                        active: true,
+                        dispute_status: crate::models::DisputeStatus::None,
+                        escrow_held: bid.amount,
+                    };
+                    updated_property.active_lease = Some(lease.clone());
+                    contract.leases.insert(lease.id, lease);
+                    contract.lease_counter += 1;
+                    contract.properties.insert(property_id, updated_property);
+                }
+            }
+        }
+        PromiseResult::Failed => {
+            let bid = {
+                let bids: &Vec<Bid> = contract.bids.get(&property_id).expect("Bid does not exist");
+                get_bid_from_list(bids, bid_id)
+            };
+
+            let current_balance = *contract
+                .stable_coin_balances
+                .get(&bid.stablecoin_token)
+                .unwrap_or(&0);
+            contract
+                .stable_coin_balances
+                .insert(bid.stablecoin_token.clone(), current_balance + bid.amount);
+
+            if let Some(bids) = contract.bids.get_mut(&property_id) {
+                let _ = update_bid_in_list(bids, bid_id, |bid| {
+                    bid.status = BidStatus::DocsConfirmed;
+                    bid.updated_at = env::block_timestamp();
+                });
+            }
+
+            env::panic_str("Escrow release failed. Payment transfer aborted.");
+        }
+    }
+}
+
+pub fn internal_raise_bid_dispute(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+    reason: String,
+) -> bool {
+    let property = contract
+        .properties
+        .get(&property_id)
+        .expect("Property does not exist");
+
+    if let Some(bids) = contract.bids.get_mut(&property_id) {
+        let _ = update_bid_in_list(bids, bid_id, |bid| {
+            let caller = env::predecessor_account_id();
+            if caller != bid.bidder && caller != property.owner_id {
+                env::panic_str("Only buyer or seller can raise dispute");
+            }
+
+            match bid.status {
+                BidStatus::Accepted | BidStatus::DocsReleased | BidStatus::DocsConfirmed => {}
+                _ => env::panic_str("Bid is not in a disputable state"),
+            }
+
+            bid.status = BidStatus::Disputed;
+            bid.updated_at = env::block_timestamp();
+            bid.dispute_reason = Some(reason);
+        });
+    } else {
+        env::panic_str("Bid does not exist");
+    }
+
+    true
+}
+
+pub fn internal_complete_transaction(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+) -> bool {
+    let property = contract
+        .properties
+        .get(&property_id)
+        .expect("Property does not exist");
+
+    if let Some(bids) = contract.bids.get_mut(&property_id) {
+        let _ = update_bid_in_list(bids, bid_id, |bid| {
+            let caller = env::predecessor_account_id();
+            if caller != bid.bidder && caller != property.owner_id {
+                env::panic_str("Only buyer or seller can complete the transaction");
+            }
+
+            if bid.status != BidStatus::PaymentReleased {
+                env::panic_str("Bid is not in a payment released state");
+            }
+
+            bid.status = BidStatus::Completed;
+            bid.updated_at = env::block_timestamp();
+        });
+    } else {
+        env::panic_str("Bid does not exist");
+    }
+
+    true
 }
 
 pub fn internal_delist_property(contract: &mut ShedaContract, property_id: u64) {

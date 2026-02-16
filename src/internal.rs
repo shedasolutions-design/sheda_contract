@@ -717,6 +717,78 @@ pub fn internal_complete_transaction(
     true
 }
 
+pub fn internal_refund_escrow_timeout(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+    timeout_nanos: u64,
+) -> Promise {
+    let bid = {
+        let bids = contract.bids.get(&property_id).expect("Bid does not exist");
+        get_bid_from_list(bids, bid_id)
+    };
+
+    match bid.status {
+        BidStatus::Accepted | BidStatus::DocsReleased => {}
+        _ => env::panic_str("Bid is not in a refundable timeout state"),
+    }
+
+    let now = env::block_timestamp();
+    if now.saturating_sub(bid.updated_at) < timeout_nanos {
+        env::panic_str("Timeout threshold not reached");
+    }
+
+    let promise = ft_contract::ext(bid.stablecoin_token.clone())
+        .with_attached_deposit(NearToken::from_yoctonear(1))
+        .with_static_gas(Gas::from_tgas(30))
+        .ft_transfer(bid.bidder.clone(), U128(bid.amount));
+
+    let current_balance = *contract
+        .stable_coin_balances
+        .get(&bid.stablecoin_token)
+        .unwrap_or(&0);
+    contract
+        .stable_coin_balances
+        .insert(bid.stablecoin_token.clone(), current_balance.saturating_sub(bid.amount));
+
+    promise.then(
+        crate::ShedaContract::ext(env::current_account_id())
+            .with_static_gas(Gas::from_tgas(30))
+            .refund_escrow_timeout_callback(property_id, bid_id, bid.stablecoin_token, bid.amount),
+    )
+}
+
+pub fn refund_escrow_timeout_callback(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+    stablecoin_token: AccountId,
+    amount: u128,
+) {
+    match env::promise_result(0) {
+        PromiseResult::Successful(_) => {
+            if let Some(bids) = contract.bids.get_mut(&property_id) {
+                let _ = update_bid_in_list(bids, bid_id, |bid| {
+                    bid.status = BidStatus::Cancelled;
+                    bid.updated_at = env::block_timestamp();
+                    bid.escrow_release_tx = Some(format!("refund:{}", env::block_height()));
+                });
+            }
+        }
+        PromiseResult::Failed => {
+            let current_balance = *contract
+                .stable_coin_balances
+                .get(&stablecoin_token)
+                .unwrap_or(&0);
+            contract
+                .stable_coin_balances
+                .insert(stablecoin_token, current_balance + amount);
+
+            env::panic_str("Timeout refund failed. Balance reverted.");
+        }
+    }
+}
+
 pub fn internal_delist_property(contract: &mut ShedaContract, property_id: u64) {
     let mut property = contract
         .properties

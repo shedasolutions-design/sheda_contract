@@ -371,6 +371,26 @@ impl ShedaContract {
         internal::internal_complete_transaction(self, property_id, bid_id)
     }
 
+    pub fn refund_escrow_timeout(
+        &mut self,
+        bid_id: u64,
+        property_id: u64,
+        timeout_nanos: u64,
+    ) -> near_sdk::Promise {
+        internal::internal_refund_escrow_timeout(self, property_id, bid_id, timeout_nanos)
+    }
+
+    #[private]
+    pub fn refund_escrow_timeout_callback(
+        &mut self,
+        property_id: u64,
+        bid_id: u64,
+        stablecoin_token: AccountId,
+        amount: u128,
+    ) {
+        internal::refund_escrow_timeout_callback(self, property_id, bid_id, stablecoin_token, amount);
+    }
+
     // Allow bidders to manually claim/withdraw their bid that was not accepted
     #[payable]
     pub fn claim_lost_bid(&mut self, bid_id: u64, property_id: u64) -> near_sdk::Promise {

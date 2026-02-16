@@ -103,6 +103,11 @@ For purchase/lease flows that require document exchange and escrow release, use 
 5. Either party finalizes:
   `complete_transaction(bid_id, property_id)`.
 
+**Timeout refunds:**
+- If the seller does not release documents after acceptance, or the buyer does not confirm receipt after release, a keeper or cron job can call:
+  `refund_escrow_timeout(bid_id, property_id, timeout_nanos)`.
+- The bid must be in `Accepted` or `DocsReleased` state, and the timeout is measured from `bid.updated_at`.
+
 **Disputes:**
 Either party can call `raise_dispute(bid_id, property_id, reason)` while the bid is `Accepted`, `DocsReleased`, or `DocsConfirmed`.
 

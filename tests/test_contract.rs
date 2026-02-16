@@ -17,8 +17,8 @@ async fn init_contract(worker: &Worker<Sandbox>) -> anyhow::Result<(Contract, Ac
     // Initialize the contract
     let stablecoin = worker.dev_create_account().await?;
 
-    let outcome = contract
-        .call("new")
+    let outcome = owner
+        .call(contract.id(), "new")
         .args_json(json!({
             "media_url": "https://example.com/logo.png",
             "supported_stablecoins": [stablecoin.id()]
@@ -449,10 +449,12 @@ async fn test_add_admin() -> anyhow::Result<()> {
 
     // Verify user is admin
     let is_admin: bool = contract
-        .view("is_caller_admin")
-        .args_json(json!({}))
+        .view("view_is_admin")
+        .args_json(json!({ "account_id": user.id() }))
         .await?
         .json()?;
+
+    assert!(is_admin, "User should be admin");
 
     println!("✅ Add admin test passed");
     Ok(())

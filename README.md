@@ -24,10 +24,10 @@ Sheda Contract is a NEAR Protocol smart contract designed for a decentralized pr
 
 The contract manages the lifecycle of property NFTs:
 1.  **Minting**: Owners create digital representations of properties.
-2.  **Listing**: Properties can be marked for sale or lease with a set price.
-3.  **Bidding**: Buyers/Tenants send stablecoins to the contract to place bids.
-4.  **Transacting**: Owners accept bids, transferring the NFT (or creating a lease) and receiving funds.
-5.  **Dispute Resolution**: Admins can intervene in lease disputes.
+2.  **Listing**: Properties are flagged for sale or lease with a price.
+3.  **Bidding**: Buyers/tenants transfer stablecoins to place bids.
+4.  **Transaction**: Owners accept bids, transfer the NFT (or create a lease), and receive funds.
+5.  **Disputes & Admins**: Admins resolve disputes and manage supported stablecoins.
 
 ## Execution Flow
 
@@ -39,7 +39,7 @@ The contract must be initialized with a media URL for metadata and a list of sup
 ### 2. Property Management
 Users mint properties to tokenize real-world assets.
 - **Method**: `mint_property(...)`
-- **Effect**: Creates an NFT and a `Property` record. The caller becomes the owner.
+- **Effect**: Creates an NFT and a `Property` record. The caller becomes the owner and is indexed in `property_per_owner` for owner-based views.
 
 ### 3. Bidding & Purchasing (`ft_on_transfer`)
 This is the core mechanism for placing bids. Instead of calling a method on this contract directly, users transfer stablecoins (e.g., USDC) to this contract via the stablecoin's `ft_transfer_call`.
@@ -52,7 +52,8 @@ This is the core mechanism for placing bids. Instead of calling a method on this
         ```json
         {
           "property_id": 1,
-          "action": "Purchase" // or "Lease"
+          "action": "Purchase", // or "Lease"
+          "stablecoin_token": "usdc.testnet"
         }
         ```
 2.  **Stablecoin Contract** transfers tokens to `sheda_contract` and calls `ft_on_transfer`.
@@ -85,6 +86,7 @@ If a bid is for a lease:
 -   The tenant or owner can `raise_dispute(lease_id)`.
 -   Admins can `resolve_dispute(lease_id)`.
 -   Once the duration passes, `expire_lease(lease_id)` can be called.
+-   `cron_check_leases()` can be called by a keeper to expire any overdue leases in bulk.
 
 ### 6. Transaction Lifecycle (Escrow + Docs)
 For purchase/lease flows that require document exchange and escrow release, use the new lifecycle methods below instead of `accept_bid`. This keeps funds in escrow until the buyer confirms documents and explicitly releases payment.
@@ -122,7 +124,7 @@ Either party can call `raise_dispute(bid_id, property_id, reason)` while the bid
 
 ### Property Actions
 -   `mint_property(title, description, media_uri, price, is_for_sale, lease_duration_months)`: Create a new property NFT.
--   `delist_property(property_id)`: Remove a property from sale/lease (must have no active bids).
+-   `delist_property(property_id)`: Remove a property from sale/lease.
 -   `delete_property(property_id)`: Burn the NFT and remove the property record.
 
 ### Bidding Actions
@@ -141,6 +143,7 @@ Either party can call `raise_dispute(bid_id, property_id, reason)` while the bid
 ### Leasing Actions
 -   `raise_lease_dispute(lease_id)`: Flag a lease for admin review.
 -   `expire_lease(lease_id)`: End a lease after its duration.
+-   `cron_check_leases()`: Expire all overdue leases.
 
 ### Admin Actions
 -   `add_admin(new_admin_id)`: Add a new admin.
@@ -164,6 +167,7 @@ Either party can call `raise_dispute(bid_id, property_id, reason)` while the bid
 -   `get_lease_by_id(lease_id)`
 -   `supported_stablecoins()`
 -   `get_all_admins()`
+-   `view_is_admin(account_id)`
 
 ## How to Build Locally?
 

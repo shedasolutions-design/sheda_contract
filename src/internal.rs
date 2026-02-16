@@ -1,5 +1,5 @@
 use near_contract_standards::non_fungible_token::core::NonFungibleTokenCore;
-use near_sdk::{assert_one_yocto, env, json_types::U128, log, require, Gas, NearToken, Promise, PromiseResult};
+use near_sdk::{assert_one_yocto, env, json_types::U128, log, require, AccountId, Gas, NearToken, Promise, PromiseResult};
 
 use crate::{
     ext::ft_contract,
@@ -820,7 +820,8 @@ pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) 
     let property = contract
         .properties
         .get(&property_id)
-        .expect("Property not found");
+        .expect("Property not found")
+        .clone();
 
     assert_eq!(
         property.owner_id,
@@ -839,6 +840,20 @@ pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) 
 
     // Remove the property from storage
     contract.properties.remove(&property_id);
+
+    let mut owner_properties = contract
+        .property_per_owner
+        .get(&property.owner_id)
+        .cloned()
+        .unwrap_or_default();
+    owner_properties.retain(|id| *id != property_id);
+    if owner_properties.is_empty() {
+        contract.property_per_owner.remove(&property.owner_id);
+    } else {
+        contract
+            .property_per_owner
+            .insert(property.owner_id.clone(), owner_properties);
+    }
 }
 
 pub fn internal_raise_dispute(contract: &mut ShedaContract, lease_id: u64) {

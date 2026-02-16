@@ -123,9 +123,8 @@ impl ShedaContract {
         self.admins.iter().cloned().collect()
     }
 
-    pub fn is_caller_admin(&mut self) -> bool {
-        let caller: AccountId = near_sdk::env::signer_account_id();
-        self.admins.contains(&caller)
+    pub fn is_caller_admin(&self, account_id: AccountId) -> bool {
+        self.admins.contains(&account_id)
     }
 
     pub fn get_owner_id(&self) -> AccountId {

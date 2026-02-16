@@ -130,7 +130,6 @@ impl HasNew for NFTContractMetadata {
 impl ShedaContract {
     //set required init parameters here
     #[init]
-    #[private]
     pub fn new(media_url: String, supported_stablecoins: Vec<AccountId>) -> Self {
         assert!(!env::state_exists(), "Contract is already initialized");
 
@@ -151,8 +150,8 @@ impl ShedaContract {
             property_counter: 0,
             bid_counter: 0,
             lease_counter: 0,
-            property_per_owner: IterableMap::new(b"o".to_vec()),
-            lease_per_tenant: IterableMap::new(b"t".to_vec()),
+            property_per_owner: IterableMap::new(b"po".to_vec()),
+            lease_per_tenant: IterableMap::new(b"lt".to_vec()),
             admins: IterableSet::new(b"a".to_vec()),
             owner_id: owner_id.clone(),
             accepted_stablecoin: supported_stablecoins.clone(),
@@ -172,7 +171,7 @@ impl ShedaContract {
         title: String,
         description: String,
         media_uri: String, // IPFS link to image
-        price: u128,
+        price: U128,
         is_for_sale: bool,
         lease_duration_months: Option<u64>,
     ) -> u64 {
@@ -204,7 +203,7 @@ impl ShedaContract {
             description,
             metadata_uri: media_uri,
             is_for_sale,
-            price,
+            price: price.0,
             lease_duration_months,
             damage_escrow: 0, // Starts at 0 until leased
             active_lease: None,
@@ -214,6 +213,14 @@ impl ShedaContract {
 
         // 5. Save Custom Data
         self.properties.insert(property_id, property);
+
+        let mut owner_properties = self
+            .property_per_owner
+            .get(&owner_id)
+            .cloned()
+            .unwrap_or_default();
+        owner_properties.push(property_id);
+        self.property_per_owner.insert(owner_id, owner_properties);
 
         // 6. Return the ID for the frontend
         property_id
@@ -322,6 +329,7 @@ impl ShedaContract {
         internal_cancel_bid(self, property_id, bid_id);
     }
 
+    #[payable]
     pub fn delist_property(&mut self, property_id: u64) {
         //ensure I own the property
 
@@ -378,6 +386,28 @@ impl ShedaContract {
         timeout_nanos: u64,
     ) -> near_sdk::Promise {
         internal::internal_refund_escrow_timeout(self, property_id, bid_id, timeout_nanos)
+    }
+
+    #[payable]
+    pub fn cron_check_leases(&mut self) -> bool {
+        let now = env::block_timestamp();
+        let expired_ids: Vec<u64> = self
+            .leases
+            .iter()
+            .filter_map(|(id, lease)| {
+                if lease.active && lease.end_time <= now {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for lease_id in expired_ids {
+            internal::internal_expire_lease(self, lease_id);
+        }
+
+        true
     }
 
     #[private]

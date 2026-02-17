@@ -4,14 +4,14 @@ use near_sdk::{ext_contract, AccountId};
 
 use crate::TokenId;
 
-// FT interface for cross-contract calls
+// FT interface for cross-contract calls for near sdk
 #[allow(dead_code)]
 #[ext_contract(ft_contract)]
 trait FT {
     fn ft_transfer(&self, receiver_id: AccountId, amount: U128);
 }
 
-// NFT interface for cross-contract calls
+// NFT interface for cross-contract calls for near sdk
 #[allow(dead_code)]
 #[ext_contract(nft_contract)]
 trait NFT {

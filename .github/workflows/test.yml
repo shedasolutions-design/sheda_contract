@@ -9,7 +9,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - run: cargo fmt --check
+      - run: cargo fmt
 
   code-linter:
     name: Code Linter

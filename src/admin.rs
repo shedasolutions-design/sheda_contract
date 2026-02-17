@@ -249,11 +249,12 @@ impl ShedaContract {
         });
         info.oracle_request_id = Some(request_id);
         lease.dispute = Some(info);
-        self.leases.insert(lease_id, lease);
 
         let promise = dispute_oracle::ext(oracle)
             .with_static_gas(Gas::from_tgas(20))
             .resolve_dispute(lease_id, property_id);
+
+        self.leases.insert(lease_id, lease);
 
         promise.then(
             Self::ext(env::current_account_id())
@@ -509,7 +510,7 @@ impl ShedaContract {
             "PropertyDelisted",
             PropertyDelistedEvent {
                 token_id: property_id,
-                admin_id: env::signer_account_id(),
+                actor_id: env::signer_account_id(),
             },
         );
     }
@@ -546,7 +547,7 @@ impl ShedaContract {
             "PropertyDeleted",
             PropertyDeletedEvent {
                 token_id: property_id,
-                admin_id: env::signer_account_id(),
+                actor_id: env::signer_account_id(),
             },
         );
 

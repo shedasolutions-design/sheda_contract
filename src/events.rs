@@ -137,14 +137,14 @@ pub struct StablecoinWithdrawnEvent {
 #[derive(Serialize, Deserialize)]
 pub struct PropertyDelistedEvent {
     pub token_id: u64,
-    pub admin_id: AccountId,
+    pub actor_id: AccountId,
 }
 
 /// Event emitted when a property is deleted by admin
 #[derive(Serialize, Deserialize)]
 pub struct PropertyDeletedEvent {
     pub token_id: u64,
-    pub admin_id: AccountId,
+    pub actor_id: AccountId,
 }
 
 /// Helper function to emit events in standardized JSON format

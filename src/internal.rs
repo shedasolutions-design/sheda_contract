@@ -5,7 +5,8 @@ use crate::{
     ext::ft_contract,
     events::{
         emit_event, BidApprovedEvent, BidCancelledEvent, BidRefundedEvent, BidRejectedEvent,
-        DealFinalizedEvent, DisputeRaisedEvent, LeaseExpiredEvent,
+        DealFinalizedEvent, DisputeRaisedEvent, LeaseExpiredEvent, PropertyDeletedEvent,
+        PropertyDelistedEvent,
     },
     models::{Action, Bid, BidStatus},
     ShedaContract,
@@ -1081,6 +1082,14 @@ pub fn internal_delist_property(contract: &mut ShedaContract, property_id: u64) 
 
     // Update the property in storage
     contract.properties.insert(property_id, property);
+
+    emit_event(
+        "PropertyDelisted",
+        PropertyDelistedEvent {
+            token_id: property_id,
+            actor_id: env::predecessor_account_id(),
+        },
+    );
 }
 
 pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) {
@@ -1121,6 +1130,14 @@ pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) 
             .property_per_owner
             .insert(property.owner_id.clone(), owner_properties);
     }
+
+    emit_event(
+        "PropertyDeleted",
+        PropertyDeletedEvent {
+            token_id: property_id,
+            actor_id: env::signer_account_id(),
+        },
+    );
 }
 
 pub fn internal_raise_dispute(contract: &mut ShedaContract, lease_id: u64, reason: String) {

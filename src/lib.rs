@@ -238,7 +238,8 @@ impl ShedaContract {
             .expect("Property not found");
 
         // Check if the amount matches the price for sale or lease
-        let _expected_amount = property.price;
+        #[allow(unused_variables)]
+        let expected_amount = property.price;
 
         require!(
             self.accepted_stablecoin

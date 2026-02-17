@@ -8,6 +8,7 @@ pub mod views;
 pub mod ext;
 #[allow(unused_imports)]
 use crate::models::{Bid, BidStatus, ContractError, DisputeStatus, Lease, Property};
+use crate::events::{emit_event, BidPlacedEvent, PropertyMintedEvent};
 use crate::{internal::*, models::Action};
 
 #[allow(unused_imports)]
@@ -17,12 +18,13 @@ use near_contract_standards::non_fungible_token::{
     NonFungibleToken, Token,
 };
 use near_sdk::{
+    borsh::{self, BorshDeserialize, BorshSerialize},
     collections::LazyOption,
     env,
-    json_types::U128,
+    json_types::{Base64VecU8, U128},
     near, require,
     store::{IterableMap, IterableSet},
-    AccountId,
+    AccountId, Gas, NearToken, Promise,
     PanicOnDefault,
 };
 
@@ -51,6 +53,64 @@ pub struct ShedaContract {
     pub owner_id: AccountId,
 
     //accepted stablecoin info could go here
+    pub accepted_stablecoin: Vec<AccountId>,
+    pub stable_coin_balances: IterableMap<AccountId, u128>,
+
+    // Guards and configuration
+    pub reentrancy_locks: IterableSet<String>,
+    pub bid_expiry_ns: u64,
+    pub escrow_release_delay_ns: u64,
+    pub lost_bid_claim_delay_ns: u64,
+
+    // Global contract factory
+    pub global_contract_code: Option<Vec<u8>>,
+    pub property_instances: IterableMap<u64, AccountId>,
+
+    pub version: u32,
+}
+
+#[derive(BorshDeserialize, BorshSerialize)]
+pub struct OldBid {
+    pub id: u64,
+    pub bidder: AccountId,
+    pub property_id: u64,
+    pub amount: u128,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub status: BidStatus,
+    pub document_token_id: Option<String>,
+    pub escrow_release_tx: Option<String>,
+    pub dispute_reason: Option<String>,
+    pub action: Action,
+    pub stablecoin_token: AccountId,
+}
+
+#[derive(BorshDeserialize, BorshSerialize)]
+pub struct OldLease {
+    pub id: u64,
+    pub property_id: u64,
+    pub tenant_id: AccountId,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub active: bool,
+    pub dispute_status: DisputeStatus,
+    pub escrow_held: u128,
+}
+
+#[derive(BorshDeserialize, BorshSerialize)]
+pub struct OldShedaContract {
+    pub tokens: NonFungibleToken,
+    pub metadata: LazyOption<NFTContractMetadata>,
+    pub properties: IterableMap<u64, Property>,
+    pub bids: IterableMap<u64, Vec<OldBid>>, //property_id to list of bids
+    pub leases: IterableMap<u64, OldLease>,
+    pub property_counter: u64,
+    pub bid_counter: u64,
+    pub lease_counter: u64,
+    pub property_per_owner: IterableMap<AccountId, Vec<u64>>,
+    pub lease_per_tenant: IterableMap<AccountId, Vec<u64>>,
+    pub admins: IterableSet<AccountId>,
+    pub owner_id: AccountId,
     pub accepted_stablecoin: Vec<AccountId>,
     pub stable_coin_balances: IterableMap<AccountId, u128>,
 }
@@ -128,6 +188,16 @@ impl HasNew for NFTContractMetadata {
 // Implement the contract structure
 #[near]
 impl ShedaContract {
+    fn checked_add_u128(left: u128, right: u128, label: &str) -> u128 {
+        left.checked_add(right)
+            .unwrap_or_else(|| env::panic_str(&format!("Overflow in {}", label)))
+    }
+
+    fn checked_sub_u128(left: u128, right: u128, label: &str) -> u128 {
+        left.checked_sub(right)
+            .unwrap_or_else(|| env::panic_str(&format!("Underflow in {}", label)))
+    }
+
     //set required init parameters here
     #[init]
     pub fn new(media_url: String, supported_stablecoins: Vec<AccountId>) -> Self {
@@ -156,6 +226,13 @@ impl ShedaContract {
             owner_id: owner_id.clone(),
             accepted_stablecoin: supported_stablecoins.clone(),
             stable_coin_balances: IterableMap::new(b"s".to_vec()),
+            reentrancy_locks: IterableSet::new(b"rl".to_vec()),
+            bid_expiry_ns: 7 * 24 * 60 * 60 * 1_000_000_000,
+            escrow_release_delay_ns: 24 * 60 * 60 * 1_000_000_000,
+            lost_bid_claim_delay_ns: 24 * 60 * 60 * 1_000_000_000,
+            global_contract_code: None,
+            property_instances: IterableMap::new(b"pi".to_vec()),
+            version: 2,
         };
         this.admins.insert(owner_id);
         for stablecoin in supported_stablecoins {
@@ -163,6 +240,186 @@ impl ShedaContract {
         }
 
         this
+    }
+
+    /// Upgrade hook to migrate state from a previous version.
+    #[init(ignore_state)]
+    #[private]
+    pub fn migrate() -> Self {
+        let old: OldShedaContract = env::state_read().expect("Old state does not exist");
+        let default_token = old
+            .accepted_stablecoin
+            .first()
+            .cloned()
+            .unwrap_or_else(|| old.owner_id.clone());
+
+        let mut bids = IterableMap::new(b"b".to_vec());
+        for (property_id, old_bids) in old.bids.iter() {
+            let upgraded_bids: Vec<Bid> = old_bids
+                .iter()
+                .map(|bid| Bid {
+                    id: bid.id,
+                    bidder: bid.bidder.clone(),
+                    property_id: bid.property_id,
+                    amount: bid.amount,
+                    created_at: bid.created_at,
+                    updated_at: bid.updated_at,
+                    status: bid.status.clone(),
+                    document_token_id: bid.document_token_id.clone(),
+                    escrow_release_tx: bid.escrow_release_tx.clone(),
+                    dispute_reason: bid.dispute_reason.clone(),
+                    expires_at: None,
+                    escrow_release_after: None,
+                    action: bid.action.clone(),
+                    stablecoin_token: bid.stablecoin_token.clone(),
+                })
+                .collect();
+            bids.insert(*property_id, upgraded_bids);
+        }
+
+        let mut leases = IterableMap::new(b"l".to_vec());
+        for (lease_id, old_lease) in old.leases.iter() {
+            leases.insert(
+                *lease_id,
+                Lease {
+                    id: old_lease.id,
+                    property_id: old_lease.property_id,
+                    tenant_id: old_lease.tenant_id.clone(),
+                    start_time: old_lease.start_time,
+                    end_time: old_lease.end_time,
+                    active: old_lease.active,
+                    dispute_status: old_lease.dispute_status.clone(),
+                    dispute: None,
+                    escrow_held: old_lease.escrow_held,
+                    escrow_token: default_token.clone(),
+                },
+            );
+        }
+        let upgraded = Self {
+            tokens: old.tokens,
+            metadata: old.metadata,
+            properties: old.properties,
+            bids,
+            leases,
+            property_counter: old.property_counter,
+            bid_counter: old.bid_counter,
+            lease_counter: old.lease_counter,
+            property_per_owner: old.property_per_owner,
+            lease_per_tenant: old.lease_per_tenant,
+            admins: old.admins,
+            owner_id: old.owner_id,
+            accepted_stablecoin: old.accepted_stablecoin,
+            stable_coin_balances: old.stable_coin_balances,
+            reentrancy_locks: IterableSet::new(b"rl".to_vec()),
+            bid_expiry_ns: 7 * 24 * 60 * 60 * 1_000_000_000,
+            escrow_release_delay_ns: 24 * 60 * 60 * 1_000_000_000,
+            lost_bid_claim_delay_ns: 24 * 60 * 60 * 1_000_000_000,
+            global_contract_code: None,
+            property_instances: IterableMap::new(b"pi".to_vec()),
+            version: 2,
+        };
+
+        upgraded
+    }
+
+    /// Owner-only contract upgrade entrypoint.
+    #[payable]
+    pub fn upgrade_self(&mut self, code: Base64VecU8) -> near_sdk::Promise {
+        require!(
+            env::predecessor_account_id() == self.owner_id,
+            "Only owner can upgrade"
+        );
+        require!(env::attached_deposit().as_yoctonear() > 0, "Attach deposit");
+
+        Promise::new(env::current_account_id())
+            .deploy_contract(code.0)
+            .then(Self::ext(env::current_account_id()).migrate())
+    }
+
+    /// Store global contract code bytes for per-property instances.
+    #[payable]
+    pub fn set_global_contract_code(&mut self, code: Base64VecU8) {
+        require!(
+            env::predecessor_account_id() == self.owner_id,
+            "Only owner can set global code"
+        );
+        require!(env::attached_deposit().as_yoctonear() > 0, "Attach deposit");
+        self.global_contract_code = Some(code.0);
+    }
+
+    /// Update bid expiry and escrow timelock settings (nanoseconds).
+    pub fn set_time_lock_config(
+        &mut self,
+        bid_expiry_ns: u64,
+        escrow_release_delay_ns: u64,
+        lost_bid_claim_delay_ns: u64,
+    ) {
+        require!(
+            env::predecessor_account_id() == self.owner_id,
+            "Only owner can update config"
+        );
+        self.bid_expiry_ns = bid_expiry_ns;
+        self.escrow_release_delay_ns = escrow_release_delay_ns;
+        self.lost_bid_claim_delay_ns = lost_bid_claim_delay_ns;
+    }
+
+    /// Deploy a per-property instance under a subaccount.
+    #[payable]
+    pub fn create_property_instance(&mut self, property_id: u64) -> Promise {
+        require!(
+            env::predecessor_account_id() == self.owner_id,
+            "Only owner can create instances"
+        );
+        require!(
+            self.properties.get(&property_id).is_some(),
+            "Property not found"
+        );
+        let code = self
+            .global_contract_code
+            .clone()
+            .expect("Global contract code not set");
+
+        let escrow_token = self
+            .accepted_stablecoin
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.owner_id.clone());
+
+        let subaccount: AccountId = format!("{}.{}", property_id, env::current_account_id())
+            .parse()
+            .expect("Invalid subaccount");
+        let initial_balance = NearToken::from_near(1);
+        require!(
+            env::attached_deposit() >= initial_balance,
+            "Insufficient deposit for instance creation"
+        );
+
+        let deploy = Promise::new(subaccount.clone())
+            .create_account()
+            .transfer(initial_balance)
+            .deploy_contract(code);
+
+        deploy
+            .then(
+                property_instance::ext(subaccount.clone())
+                    .with_static_gas(Gas::from_tgas(20))
+                    .new(self.owner_id.clone(), property_id, escrow_token),
+            )
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(Gas::from_tgas(10))
+                    .on_property_instance_created(property_id, subaccount),
+            )
+    }
+
+    #[private]
+    pub fn on_property_instance_created(&mut self, property_id: u64, account_id: AccountId) {
+        match env::promise_result(0) {
+            near_sdk::PromiseResult::Successful(_) => {
+                self.property_instances.insert(property_id, account_id);
+            }
+            _ => env::panic_str("Property instance creation failed"),
+        }
     }
 
     #[payable]
@@ -201,7 +458,7 @@ impl ShedaContract {
             id: property_id,
             owner_id: owner_id.clone(),
             description,
-            metadata_uri: media_uri,
+            metadata_uri: media_uri.clone(),
             is_for_sale,
             price: price.0,
             lease_duration_months,
@@ -220,7 +477,26 @@ impl ShedaContract {
             .cloned()
             .unwrap_or_default();
         owner_properties.push(property_id);
-        self.property_per_owner.insert(owner_id, owner_properties);
+        self.property_per_owner
+            .insert(owner_id.clone(), owner_properties);
+
+        emit_event(
+            "PropertyMinted",
+            PropertyMintedEvent {
+                token_id: property_id,
+                owner_id: owner_id.clone(),
+                metadata_uri: media_uri,
+                price: price.0,
+                is_for_sale,
+                lease_duration_nanos: lease_duration_months.unwrap_or(0)
+                    * 30
+                    * 24
+                    * 60
+                    * 60
+                    * 1_000_000_000,
+                damage_escrow_amount: 0,
+            },
+        );
 
         // 6. Return the ID for the frontend
         property_id
@@ -247,13 +523,18 @@ impl ShedaContract {
             "StablecoinNotAccepted"
         );
 
-        // require!(
-        //     amount.0 == expected_amount,
-        //     format!(
-        //         "IncorrectBidAmount: expected {}, received {}",
-        //         expected_amount, amount.0
-        //     )
-        // );
+        require!(
+            bid_action.stablecoin_token == env::predecessor_account_id(),
+            "StablecoinMismatch"
+        );
+
+        require!(
+            amount.0 == expected_amount,
+            format!(
+                "IncorrectBidAmount: expected {}, received {}",
+                expected_amount, amount.0
+            )
+        );
 
         //assert the property is fo sale if action is sales and for lease if action is lease
         match bid_action.action {
@@ -274,6 +555,12 @@ impl ShedaContract {
 
         // Assuming Bid struct has fields: id, property_id, bidder, amount, etc.
         // Adjust based on actual Bid struct definition
+        let expires_at = if self.bid_expiry_ns == 0 {
+            None
+        } else {
+            Some(env::block_timestamp() + self.bid_expiry_ns)
+        };
+
         let bid = Bid {
             id: bid_id,
             property_id: property_id,
@@ -285,9 +572,21 @@ impl ShedaContract {
             document_token_id: None,
             escrow_release_tx: None,
             dispute_reason: None,
+            expires_at,
+            escrow_release_after: None,
             action: bid_action.action.clone(),
             stablecoin_token: env::predecessor_account_id(),
         };
+
+        emit_event(
+            "BidPlaced",
+            BidPlacedEvent {
+                token_id: property_id,
+                bidder_id: bid.bidder.clone(),
+                amount: bid.amount,
+                created_at: bid.created_at,
+            },
+        );
 
         // Insert the bid into the bids map
         self.bids.entry(property_id).or_insert(Vec::new()).push(bid);
@@ -298,8 +597,10 @@ impl ShedaContract {
             .get(&env::predecessor_account_id())
             .unwrap_or(&0);
 
-        self.stable_coin_balances
-            .insert(env::predecessor_account_id(), current_balance + amount.0);
+        self.stable_coin_balances.insert(
+            env::predecessor_account_id(),
+            Self::checked_add_u128(current_balance, amount.0, "bid deposit"),
+        );
 
         // Returning 0 means: keep all tokens, no refund
         U128(0)
@@ -343,7 +644,11 @@ impl ShedaContract {
     }
 
     pub fn raise_lease_dispute(&mut self, lease_id: u64) {
-        internal_raise_dispute(self, lease_id);
+        internal_raise_dispute(self, lease_id, "".to_string());
+    }
+
+    pub fn raise_lease_dispute_with_reason(&mut self, lease_id: u64, reason: String) {
+        internal_raise_dispute(self, lease_id, reason);
     }
 
     pub fn raise_dispute(&mut self, bid_id: u64, property_id: u64, reason: String) -> bool {
@@ -425,6 +730,7 @@ impl ShedaContract {
     // Allow bidders to manually claim/withdraw their bid that was not accepted
     #[payable]
     pub fn claim_lost_bid(&mut self, bid_id: u64, property_id: u64) -> near_sdk::Promise {
+        internal::lock_bid(self, property_id, bid_id);
         let bids = self.bids.get(&property_id).expect("No bids for this property");
         
         let bid = bids
@@ -432,6 +738,11 @@ impl ShedaContract {
             .find(|b| b.id == bid_id)
             .expect("Bid not found")
             .clone();
+
+        require!(
+            bid.status == BidStatus::Pending || bid.status == BidStatus::Rejected,
+            "Bid is not claimable"
+        );
 
         // Only the bidder can claim their own bid
         assert_eq!(
@@ -456,6 +767,23 @@ impl ShedaContract {
 
         assert!(can_claim, "Cannot claim bid: property not yet sold/leased to another party");
 
+        let claimable_at = match bid.action {
+            crate::models::Action::Purchase => property
+                .sold
+                .as_ref()
+                .map(|sold| sold.sold_at + self.lost_bid_claim_delay_ns),
+            crate::models::Action::Lease => property
+                .active_lease
+                .as_ref()
+                .map(|lease| lease.start_time + self.lost_bid_claim_delay_ns),
+        };
+        if let Some(unlock_at) = claimable_at {
+            require!(
+                env::block_timestamp() >= unlock_at,
+                "Lost bid claim timelock not reached"
+            );
+        }
+
         // Refund the bid amount
         let promise = crate::ext::ft_contract::ext(bid.stablecoin_token.clone())
             .with_attached_deposit(near_sdk::NearToken::from_yoctonear(1))
@@ -467,8 +795,10 @@ impl ShedaContract {
             .stable_coin_balances
             .get(&bid.stablecoin_token)
             .unwrap_or(&0);
-        self.stable_coin_balances
-            .insert(bid.stablecoin_token.clone(), current_balance.saturating_sub(bid.amount));
+        self.stable_coin_balances.insert(
+            bid.stablecoin_token.clone(),
+            Self::checked_sub_u128(current_balance, bid.amount, "lost_bid refund"),
+        );
 
         // Return promise and handle callback to update bid status only on success
         promise.then(
@@ -480,6 +810,7 @@ impl ShedaContract {
 
     #[private]
     pub fn claim_lost_bid_callback(&mut self, bid_id: u64, property_id: u64, stablecoin_token: AccountId, amount: u128) {
+        internal::unlock_bid(self, property_id, bid_id);
         match env::promise_result(0) {
             near_sdk::PromiseResult::Successful(_) => {
                 if let Some(bids) = self.bids.get_mut(&property_id) {
@@ -497,8 +828,10 @@ impl ShedaContract {
                     .stable_coin_balances
                     .get(&stablecoin_token)
                     .unwrap_or(&0);
-                self.stable_coin_balances
-                    .insert(stablecoin_token, current_balance + amount);
+                self.stable_coin_balances.insert(
+                    stablecoin_token,
+                    Self::checked_add_u128(current_balance, amount, "lost_bid revert"),
+                );
 
                 near_sdk::log!("Bid claim failed, balance reverted");
             }

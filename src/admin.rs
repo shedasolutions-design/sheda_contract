@@ -3,10 +3,24 @@ use crate::internal::extract_base_uri;
 #[allow(unused_imports)]
 use crate::{HasNew, models::*};
 use crate::views::LeaseView;
+use crate::events::{
+    emit_event, AdminAddedEvent, AdminRemovedEvent, DisputeResolvedEvent,
+    EmergencyWithdrawalEvent,
+};
 use crate::{models::ContractError, ShedaContract, ShedaContractExt};
 use near_contract_standards::non_fungible_token::metadata::NFTContractMetadata;
 use near_sdk::json_types::U128;
 use near_sdk::{env, log, near_bindgen, AccountId, Gas, NearToken, PromiseResult};
+
+fn checked_add_u128(left: u128, right: u128, label: &str) -> u128 {
+    left.checked_add(right)
+        .unwrap_or_else(|| env::panic_str(&format!("Overflow in {}", label)))
+}
+
+fn checked_sub_u128(left: u128, right: u128, label: &str) -> u128 {
+    left.checked_sub(right)
+        .unwrap_or_else(|| env::panic_str(&format!("Underflow in {}", label)))
+}
 
 #[near_bindgen]
 impl ShedaContract {
@@ -20,6 +34,13 @@ impl ShedaContract {
         );
         self.admins.insert(new_admin_id.clone());
         log!("Admin {} added", new_admin_id);
+        emit_event(
+            "AdminAdded",
+            AdminAddedEvent {
+                admin_id: new_admin_id,
+                added_by: env::signer_account_id(),
+            },
+        );
     }
 
     #[payable]
@@ -32,6 +53,13 @@ impl ShedaContract {
         );
         self.admins.remove(&admin_id);
         log!("Admin {} removed", admin_id);
+        emit_event(
+            "AdminRemoved",
+            AdminRemovedEvent {
+                admin_id: admin_id.clone(),
+                removed_by: env::signer_account_id(),
+            },
+        );
     }
 
     pub fn is_admin(&self, account_id: AccountId) -> bool {
@@ -40,7 +68,12 @@ impl ShedaContract {
 
     #[handle_result]
     #[payable]
-    pub fn resolve_dispute(&mut self, lease_id: u64) -> Result<(), ContractError> {
+    pub fn resolve_dispute(
+        &mut self,
+        lease_id: u64,
+        winner: DisputeWinner,
+        payout_amount: U128,
+    ) -> Result<(), ContractError> {
         let mut lease = self
             .leases
             .get(&lease_id)
@@ -56,12 +89,55 @@ impl ShedaContract {
             "UnauthorizedAccess"
         );
 
+        let recipient = match winner {
+            DisputeWinner::Tenant => lease.tenant_id.clone(),
+            DisputeWinner::Owner => self
+                .properties
+                .get(&lease.property_id)
+                .expect("Property not found")
+                .owner_id
+                .clone(),
+        };
+
+        let payout = payout_amount.0.min(lease.escrow_held);
+        let escrow_token = lease.escrow_token.clone();
+
         lease.dispute_status = DisputeStatus::Resolved;
+        if let Some(info) = lease.dispute.as_mut() {
+            info.oracle_result = Some(winner.clone());
+            info.resolved_by = Some(env::signer_account_id());
+            info.resolved_at = Some(env::block_timestamp());
+        }
         self.leases.insert(lease_id, lease);
         log!(
             "Dispute for lease {} resolved by admin {}",
             lease_id,
             env::signer_account_id()
+        );
+
+        let current_balance = *self
+            .stable_coin_balances
+            .get(&escrow_token)
+            .unwrap_or(&0);
+        self.stable_coin_balances.insert(
+            escrow_token.clone(),
+            checked_sub_u128(current_balance, payout, "resolve_dispute payout"),
+        );
+
+        #[allow(unused_must_use)]
+        ft_contract::ext(escrow_token)
+            .with_attached_deposit(NearToken::from_yoctonear(1))
+            .with_static_gas(Gas::from_tgas(30))
+            .ft_transfer(recipient.clone(), U128(payout));
+
+        emit_event(
+            "DisputeResolved",
+            DisputeResolvedEvent {
+                token_id: lease_id,
+                admin_id: env::signer_account_id(),
+                winner_id: recipient,
+                escrow_returned: payout,
+            },
         );
 
         Ok(())
@@ -91,6 +167,8 @@ impl ShedaContract {
         );
         if !self.accepted_stablecoin.contains(&token_account) {
             self.accepted_stablecoin.push(token_account.clone());
+            self.stable_coin_balances
+                .insert(token_account.clone(), 0);
             log!(
                 "Stablecoin {} added by owner {}",
                 token_account,
@@ -134,6 +212,14 @@ impl ShedaContract {
                     to_account,
                     env::signer_account_id()
                 );
+                emit_event(
+                    "EmergencyWithdrawal",
+                    EmergencyWithdrawalEvent {
+                        amount: balance,
+                        recipient: to_account.clone(),
+                        initiated_by: env::signer_account_id(),
+                    },
+                );
             }
         }
     }
@@ -147,7 +233,10 @@ impl ShedaContract {
             PromiseResult::Failed => {
                 log!("Withdrawal of {} {} failed, reverting balance", amount.0, token);
                 let current_balance = *self.stable_coin_balances.get(&token).unwrap_or(&0);
-                self.stable_coin_balances.insert(token, current_balance + amount.0);
+                self.stable_coin_balances.insert(
+                    token,
+                    checked_add_u128(current_balance, amount.0, "withdraw revert"),
+                );
             }
         }
     }
@@ -158,6 +247,8 @@ impl ShedaContract {
             self.owner_id,
             "Only owner can remove supported stablecoins"
         );
+        let balance = *self.stable_coin_balances.get(&token_account).unwrap_or(&0);
+        assert_eq!(balance, 0, "Stablecoin balance must be zero to remove");
         if let Some(index) = self
             .accepted_stablecoin
             .iter()
@@ -182,8 +273,10 @@ impl ShedaContract {
         assert!(balance >= amount, "Insufficient balance for withdrawal");
         
         // Optimistically update balance
-        self.stable_coin_balances
-            .insert(token_account.clone(), balance - amount);
+        self.stable_coin_balances.insert(
+            token_account.clone(),
+            checked_sub_u128(balance, amount, "withdraw"),
+        );
 
         //cross contract call to transfer stablecoin to owner
         #[allow(unused_must_use)]
@@ -228,7 +321,7 @@ impl ShedaContract {
                     .unwrap_or(&0);
                 self.stable_coin_balances.insert(
                     stablecoin_token.clone(),
-                    current_balance.saturating_sub(amount),
+                    checked_sub_u128(current_balance, amount, "refund_bids"),
                 );
 
                 //cross contract call to transfer stablecoin back to bidder

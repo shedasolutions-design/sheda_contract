@@ -17,3 +17,10 @@ trait FT {
 trait NFT {
     fn nft_transfer(&self, receiver_id: AccountId, token_id: TokenId);
 }
+
+// Property instance interface for global contract factory
+#[allow(dead_code)]
+#[ext_contract(property_instance)]
+trait PropertyInstance {
+    fn new(owner_id: AccountId, property_id: u64, escrow_token: AccountId);
+}

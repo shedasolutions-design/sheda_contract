@@ -22,7 +22,9 @@ pub struct LeaseView {
     pub end_time: u64,
     pub active: bool,
     pub dispute_status: DisputeStatusView,
+    pub dispute: Option<DisputeInfoView>,
     pub escrow_held: String, // u128 as string for JSON
+    pub escrow_token: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -38,6 +40,7 @@ pub struct PropertyView {
     pub active_lease: Option<LeaseView>,
     pub timestamp: u64,
     pub sold: Option<SoldView>,
+    pub property_instance: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -61,8 +64,19 @@ pub struct BidView {
     pub document_token_id: Option<String>,
     pub escrow_release_tx: Option<String>,
     pub dispute_reason: Option<String>,
+    pub expires_at: Option<u64>,
+    pub escrow_release_after: Option<u64>,
     pub action: Action,
     pub stablecoin_token: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, JsonSchema)]
+pub struct UserStatsView {
+    pub account_id: String,
+    pub total_bids: u64,
+    pub total_properties: u64,
+    pub total_leases: u64,
+    pub active_leases: u64,
 }
 
 /// Conversion functions from internal models to view structs
@@ -91,7 +105,9 @@ impl From<&Lease> for LeaseView {
             end_time: lease.end_time,
             active: lease.active,
             dispute_status: (&lease.dispute_status).into(),
+            dispute: lease.dispute.as_ref().map(|info| info.into()),
             escrow_held: lease.escrow_held.to_string(),
+            escrow_token: lease.escrow_token.to_string(),
         }
     }
 }
@@ -110,6 +126,7 @@ impl From<&Property> for PropertyView {
             active_lease: property.active_lease.as_ref().map(|lease| lease.into()),
             timestamp: property.timestamp,
             sold: property.sold.as_ref().map(|sold| sold.into()),
+            property_instance: None,
         }
     }
 }
@@ -139,6 +156,8 @@ impl From<&Bid> for BidView {
             document_token_id: bid.document_token_id.clone(),
             escrow_release_tx: bid.escrow_release_tx.clone(),
             dispute_reason: bid.dispute_reason.clone(),
+            expires_at: bid.expires_at,
+            escrow_release_after: bid.escrow_release_after,
             action: bid.action.clone(),
             stablecoin_token: bid.stablecoin_token.to_string(),
         }
@@ -146,6 +165,15 @@ impl From<&Bid> for BidView {
 }
 #[near_bindgen]
 impl ShedaContract {
+    fn property_to_view(&self, property: &Property) -> PropertyView {
+        let mut view: PropertyView = property.into();
+        view.property_instance = self
+            .property_instances
+            .get(&property.id)
+            .map(|account| account.to_string());
+        view
+    }
+
     pub fn get_all_admins(&self) -> Vec<AccountId> {
         self.admins.iter().cloned().collect()
     }
@@ -171,7 +199,9 @@ impl ShedaContract {
     }
 
     pub fn get_property_by_id(&self, property_id: u64) -> Option<PropertyView> {
-        self.properties.get(&property_id).map(|p| p.into())
+        self.properties
+            .get(&property_id)
+            .map(|p| self.property_to_view(p))
     }
 
     pub fn get_lease_by_id(&self, lease_id: u64) -> Option<LeaseView> {
@@ -194,7 +224,7 @@ impl ShedaContract {
             if count >= limit {
                 break;
             }
-            result.push(value.into());
+            result.push(self.property_to_view(value));
             count += 1;
         }
         result
@@ -205,7 +235,7 @@ impl ShedaContract {
         if let Some(ids) = property_ids {
             for id in ids {
                 if let Some(property) = self.properties.get(&id) {
-                    properties.push(property.into());
+                    properties.push(self.property_to_view(property));
                 }
             }
         }
@@ -216,9 +246,21 @@ impl ShedaContract {
         self.accepted_stablecoin.clone()
     }
 
+    pub fn get_property_instance(&self, property_id: u64) -> Option<AccountId> {
+        self.property_instances.get(&property_id).cloned()
+    }
+
     pub fn get_stablecoin_balance(&self, token_account: AccountId) -> String {
         let balance = self.stable_coin_balances.get(&token_account).unwrap_or(&0);
         balance.to_string()
+    }
+
+    pub fn get_time_lock_config(&self) -> (u64, u64, u64) {
+        (
+            self.bid_expiry_ns,
+            self.escrow_release_delay_ns,
+            self.lost_bid_claim_delay_ns,
+        )
     }
 
     //NOTE Poperty Owner specific
@@ -325,5 +367,36 @@ impl ShedaContract {
     pub fn get_my_leases(&mut self) -> Vec<LeaseView> {
         let caller = env::signer_account_id();
         self.get_leases_by_tenant(caller)
+    }
+
+    pub fn get_active_leases_count(&self) -> u64 {
+        self.leases.values().filter(|lease| lease.active).count() as u64
+    }
+
+    pub fn get_user_stats(&self, account_id: AccountId) -> UserStatsView {
+        let total_bids = self
+            .bids
+            .iter()
+            .flat_map(|(_property_id, bids)| bids.iter())
+            .filter(|bid| bid.bidder == account_id)
+            .count() as u64;
+
+        let total_properties = self
+            .property_per_owner
+            .get(&account_id)
+            .map(|ids| ids.len() as u64)
+            .unwrap_or(0);
+
+        let leases = self.get_leases_by_tenant(account_id.clone());
+        let total_leases = leases.len() as u64;
+        let active_leases = leases.iter().filter(|lease| lease.active).count() as u64;
+
+        UserStatsView {
+            account_id: account_id.to_string(),
+            total_bids,
+            total_properties,
+            total_leases,
+            active_leases,
+        }
     }
 }

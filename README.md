@@ -12,6 +12,7 @@ Sheda Contract is a NEAR Protocol smart contract designed for a decentralized pr
   - [4. Accepting Bids](#4-accepting-bids)
   - [5. Leasing & Disputes](#5-leasing--disputes)
   - [6. Transaction Lifecycle (Escrow + Docs)](#6-transaction-lifecycle-escrow--docs)
+  - [7. Timelock Configuration](#7-timelock-configuration)
 - [Available Methods](#available-methods)
   - [Initialization](#initialization)
   - [Property Actions](#property-actions)
@@ -60,9 +61,11 @@ This is the core mechanism for placing bids. Instead of calling a method on this
 3.  **Sheda Contract** (`ft_on_transfer`):
     *   Parses `msg` to get `property_id` and `action`.
     *   Verifies the stablecoin is in the `accepted_stablecoin` list.
+  *   Verifies the `stablecoin_token` in the message matches the token that called `ft_on_transfer`.
     *   Verifies the transferred `amount` matches the property's `price`.
     *   Verifies the property is listed for the requested action (Sale/Lease).
     *   Creates a `Bid` record stored in the contract.
+  *   Sets an expiry timestamp for the bid (configurable).
     *   Updates internal `stable_coin_balances`.
     *   Returns `0` (keeps all tokens).
 
@@ -71,6 +74,7 @@ The property owner reviews bids and accepts one.
 - **Method**: `accept_bid(bid_id, property_id)`
 - **Flow**:
     1.  Verifies caller is the property owner.
+  2.  Verifies the bid has not expired. If expired, the bid is auto-rejected and refunded.
     2.  **Transfer Funds**: Sends the bid amount (stablecoins) from the contract to the owner.
     3.  **Callback**:
         *   **Success**:
@@ -83,8 +87,8 @@ The property owner reviews bids and accepts one.
 ### 5. Leasing & Disputes
 If a bid is for a lease:
 -   A `Lease` object is created on the property.
--   The tenant or owner can `raise_dispute(lease_id)`.
--   Admins can `resolve_dispute(lease_id)`.
+-   The tenant can `raise_lease_dispute(lease_id)` or `raise_lease_dispute_with_reason(lease_id, reason)`.
+-   Admins can `resolve_dispute(lease_id, winner, payout_amount)` which pays escrow to the winner.
 -   Once the duration passes, `expire_lease(lease_id)` can be called.
 -   `cron_check_leases()` can be called by a keeper to expire any overdue leases in bulk.
 
@@ -105,6 +109,10 @@ For purchase/lease flows that require document exchange and escrow release, use 
 5. Either party finalizes:
   `complete_transaction(bid_id, property_id)`.
 
+**Escrow timelock:**
+- After `confirm_document_receipt`, escrow cannot be released until the configured delay has elapsed.
+- Lost bid claims also respect a configurable delay after a sale/lease completes.
+
 **Timeout refunds:**
 - If the seller does not release documents after acceptance, or the buyer does not confirm receipt after release, a keeper or cron job can call:
   `refund_escrow_timeout(bid_id, property_id, timeout_nanos)`.
@@ -117,6 +125,11 @@ Either party can call `raise_dispute(bid_id, property_id, reason)` while the bid
 - The `document_token_id` is expected to reference an agreement NFT minted off-chain or by a supporting contract. The backend can store document metadata and links, while this contract only stores the token id.
 - Escrow remains locked until the buyer calls `release_escrow`, so client apps should surface this step explicitly after document confirmation.
 
+### 7. Timelock Configuration
+Owners can update time-based parameters (in nanoseconds) that control bid expiry and escrow delays.
+- **Method**: `set_time_lock_config(bid_expiry_ns, escrow_release_delay_ns, lost_bid_claim_delay_ns)`
+- **View**: `get_time_lock_config()`
+
 ## Available Methods
 
 ### Initialization
@@ -126,6 +139,8 @@ Either party can call `raise_dispute(bid_id, property_id, reason)` while the bid
 -   `mint_property(title, description, media_uri, price, is_for_sale, lease_duration_months)`: Create a new property NFT.
 -   `delist_property(property_id)`: Remove a property from sale/lease.
 -   `delete_property(property_id)`: Burn the NFT and remove the property record.
+-   `set_global_contract_code(code)`: Store global instance code for factory deployments (Owner only).
+-   `create_property_instance(property_id)`: Deploy a per-property subaccount instance (Owner only).
 
 ### Bidding Actions
 -   `ft_on_transfer(sender_id, amount, msg)`: **(Called by Stablecoin Contract)** Handles incoming bid deposits.
@@ -133,24 +148,29 @@ Either party can call `raise_dispute(bid_id, property_id, reason)` while the bid
 -   `accept_bid_with_escrow(bid_id, property_id)`: Owner accepts a bid but keeps funds in escrow for the lifecycle flow.
 -   `reject_bid(bid_id, property_id)`: Owner rejects a bid (refunds bidder).
 -   `cancel_bid(bid_id, property_id)`: Bidder cancels their bid (refunds bidder).
--   `claim_lost_bid(bid_id, property_id)`: Manually claim a refund if a bid was "lost" (e.g., due to gas limits during acceptance).
+-   `claim_lost_bid(bid_id, property_id)`: Manually claim a refund if a bid was "lost" after sale/lease (subject to timelock).
 -   `confirm_document_release(bid_id, property_id, document_token_id)`: Seller releases the agreement NFT to buyer.
 -   `confirm_document_receipt(bid_id, property_id)`: Buyer confirms receipt of agreement NFT.
--   `release_escrow(bid_id, property_id)`: Buyer releases escrowed stablecoin to seller.
+-   `release_escrow(bid_id, property_id)`: Buyer releases escrowed stablecoin to seller (subject to timelock).
 -   `complete_transaction(bid_id, property_id)`: Finalize the transaction once escrow is released.
 -   `raise_dispute(bid_id, property_id, reason)`: Raise a dispute for the transaction lifecycle.
+-   `refund_escrow_timeout(bid_id, property_id, timeout_nanos)`: Refund a stalled escrow after timeout.
 
 ### Leasing Actions
 -   `raise_lease_dispute(lease_id)`: Flag a lease for admin review.
+-   `raise_lease_dispute_with_reason(lease_id, reason)`: Flag a lease with a reason.
 -   `expire_lease(lease_id)`: End a lease after its duration.
 -   `cron_check_leases()`: Expire all overdue leases.
+
+### Configuration Actions
+-   `set_time_lock_config(bid_expiry_ns, escrow_release_delay_ns, lost_bid_claim_delay_ns)`: Update timelock settings (Owner only).
 
 ### Admin Actions
 -   `add_admin(new_admin_id)`: Add a new admin.
 -   `remove_admin(admin_id)`: Remove an admin.
 -   `add_supported_stablecoin(token_account)`: Whitelist a stablecoin.
 -   `remove_supported_stablecoin(token_account)`: Remove a stablecoin from whitelist.
--   `resolve_dispute(lease_id)`: Mark a dispute as resolved.
+-   `resolve_dispute(lease_id, winner, payout_amount)`: Resolve a lease dispute and pay escrow to the winner.
 -   `emergency_withdraw(to_account)`: Withdraw all stablecoins to a specific account (Owner only).
 -   `withdraw_stablecoin(token_account, amount)`: Withdraw specific amount (Owner only).
 -   `refund_bids(property_id)`: Admin manually refunds bids for a property.
@@ -168,6 +188,10 @@ Either party can call `raise_dispute(bid_id, property_id, reason)` while the bid
 -   `supported_stablecoins()`
 -   `get_all_admins()`
 -   `view_is_admin(account_id)`
+-   `get_time_lock_config()`
+-   `get_active_leases_count()`
+-   `get_user_stats(account_id)`
+-   `get_property_instance(property_id)`
 
 ## How to Build Locally?
 

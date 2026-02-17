@@ -19,6 +19,38 @@ pub enum DisputeStatus {
 #[derive(
     BorshDeserialize, BorshSerialize, Deserialize, Serialize, PartialEq, Debug, Clone, JsonSchema,
 )]
+pub enum DisputeWinner {
+    Tenant,
+    Owner,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
+pub struct DisputeInfo {
+    pub raised_by: AccountId,
+    pub raised_at: Timestamp,
+    pub reason: String,
+    pub votes_for_tenant: u64,
+    pub votes_for_owner: u64,
+    pub oracle_result: Option<DisputeWinner>,
+    pub resolved_by: Option<AccountId>,
+    pub resolved_at: Option<Timestamp>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DisputeInfoView {
+    pub raised_by: String,
+    pub raised_at: Timestamp,
+    pub reason: String,
+    pub votes_for_tenant: u64,
+    pub votes_for_owner: u64,
+    pub oracle_result: Option<DisputeWinner>,
+    pub resolved_by: Option<String>,
+    pub resolved_at: Option<Timestamp>,
+}
+
+#[derive(
+    BorshDeserialize, BorshSerialize, Deserialize, Serialize, PartialEq, Debug, Clone, JsonSchema,
+)]
 pub enum BidStatus {
     Pending,
     Accepted,
@@ -68,6 +100,8 @@ pub struct Bid {
     pub document_token_id: Option<String>,
     pub escrow_release_tx: Option<String>,
     pub dispute_reason: Option<String>,
+    pub expires_at: Option<Timestamp>,
+    pub escrow_release_after: Option<Timestamp>,
     pub action: Action,
     pub stablecoin_token: AccountId,
 }
@@ -87,17 +121,18 @@ pub enum Action {
     Lease,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone, JsonSchema)]
+#[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
 pub struct Lease {
     pub id: u64,
     pub property_id: u64,
-    #[schemars(skip)]
     pub tenant_id: AccountId,
     pub start_time: Timestamp,
     pub end_time: Timestamp,
     pub active: bool,
     pub dispute_status: DisputeStatus,
+    pub dispute: Option<DisputeInfo>,
     pub escrow_held: u128,
+    pub escrow_token: AccountId,
 }
 
 // Kept your error handling, it is clean.
@@ -168,6 +203,7 @@ pub struct PropertyView {
     pub active_lease: Option<LeaseView>,
     pub timestamp: Timestamp,
     pub sold: Option<SoldView>,
+    pub property_instance: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -179,7 +215,9 @@ pub struct LeaseView {
     pub end_time: Timestamp,
     pub active: bool,
     pub dispute_status: DisputeStatus,
+    pub dispute: Option<DisputeInfoView>,
     pub escrow_held: u128,
+    pub escrow_token: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -194,6 +232,8 @@ pub struct BidView {
     pub document_token_id: Option<String>,
     pub escrow_release_tx: Option<String>,
     pub dispute_reason: Option<String>,
+    pub expires_at: Option<Timestamp>,
+    pub escrow_release_after: Option<Timestamp>,
     pub action: Action,
     pub stablecoin_token: String,
 }
@@ -212,6 +252,7 @@ impl Property {
             active_lease: self.active_lease.as_ref().map(|l| l.to_view()),
             timestamp: self.timestamp,
             sold: self.sold.as_ref().map(|s| s.to_view()),
+            property_instance: None,
         }
     }
 }
@@ -226,7 +267,24 @@ impl Lease {
             end_time: self.end_time,
             active: self.active,
             dispute_status: self.dispute_status.clone(),
+            dispute: self.dispute.as_ref().map(|info| info.into()),
             escrow_held: self.escrow_held,
+            escrow_token: self.escrow_token.to_string(),
+        }
+    }
+}
+
+impl From<&DisputeInfo> for DisputeInfoView {
+    fn from(info: &DisputeInfo) -> Self {
+        Self {
+            raised_by: info.raised_by.to_string(),
+            raised_at: info.raised_at,
+            reason: info.reason.clone(),
+            votes_for_tenant: info.votes_for_tenant,
+            votes_for_owner: info.votes_for_owner,
+            oracle_result: info.oracle_result.clone(),
+            resolved_by: info.resolved_by.as_ref().map(|id| id.to_string()),
+            resolved_at: info.resolved_at,
         }
     }
 }
@@ -248,6 +306,27 @@ impl Sold {
             amount: self.amount,
             previous_owner_id: self.previous_owner_id.to_string(),
             sold_at: self.sold_at,
+        }
+    }
+}
+
+impl Bid {
+    pub fn to_view(&self) -> BidView {
+        BidView {
+            id: self.id,
+            bidder_id: self.bidder.to_string(),
+            property_id: self.property_id,
+            bid_amount: self.amount,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            status: self.status.clone(),
+            document_token_id: self.document_token_id.clone(),
+            escrow_release_tx: self.escrow_release_tx.clone(),
+            dispute_reason: self.dispute_reason.clone(),
+            expires_at: self.expires_at,
+            escrow_release_after: self.escrow_release_after,
+            action: self.action.clone(),
+            stablecoin_token: self.stablecoin_token.to_string(),
         }
     }
 }

@@ -83,6 +83,58 @@ async fn test_owner_is_admin() -> anyhow::Result<()> {
 }
 
 // ============================================================================
+// 2.5 CONFIG AND AGGREGATED VIEW TESTS
+// ============================================================================
+
+#[tokio::test]
+async fn test_time_lock_config_roundtrip() -> anyhow::Result<()> {
+    let worker = near_workspaces::sandbox().await?;
+    let (contract, owner, _user) = init_contract(&worker).await?;
+
+    let new_config = (123_u64, 456_u64, 789_u64);
+
+    let outcome = owner
+        .call(contract.id(), "set_time_lock_config")
+        .args_json(json!({
+            "bid_expiry_ns": new_config.0,
+            "escrow_release_delay_ns": new_config.1,
+            "lost_bid_claim_delay_ns": new_config.2
+        }))
+        .transact()
+        .await?;
+
+    assert!(outcome.is_success(), "Config update should succeed");
+
+    let config: (u64, u64, u64) = contract.view("get_time_lock_config").await?.json()?;
+    assert_eq!(config, new_config);
+
+    println!("✅ Time lock config roundtrip test passed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_user_stats_empty() -> anyhow::Result<()> {
+    let worker = near_workspaces::sandbox().await?;
+    let (contract, _owner, user) = init_contract(&worker).await?;
+
+    let stats: serde_json::Value = contract
+        .view("get_user_stats")
+        .args_json(json!({
+            "account_id": user.id()
+        }))
+        .await?
+        .json()?;
+
+    assert_eq!(stats["total_bids"].as_u64().unwrap(), 0);
+    assert_eq!(stats["total_properties"].as_u64().unwrap(), 0);
+    assert_eq!(stats["total_leases"].as_u64().unwrap(), 0);
+    assert_eq!(stats["active_leases"].as_u64().unwrap(), 0);
+
+    println!("✅ User stats empty test passed");
+    Ok(())
+}
+
+// ============================================================================
 // 2. MINT PROPERTY NFT TESTS
 // ============================================================================
 

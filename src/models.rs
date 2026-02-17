@@ -193,6 +193,7 @@ pub struct BidView {
     pub status: BidStatus,
     pub document_token_id: Option<String>,
     pub escrow_release_tx: Option<String>,
+    pub dispute_reason: Option<String>,
     pub action: Action,
     pub stablecoin_token: String,
 }

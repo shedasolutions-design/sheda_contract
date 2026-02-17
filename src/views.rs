@@ -49,6 +49,7 @@ pub struct BidView {
     pub status: BidStatus,
     pub document_token_id: Option<String>,
     pub escrow_release_tx: Option<String>,
+    pub dispute_reason: Option<String>,
     pub action: Action,
     pub stablecoin_token: String,
 }
@@ -112,6 +113,7 @@ impl From<&Bid> for BidView {
             status: bid.status.clone(),
             document_token_id: bid.document_token_id.clone(),
             escrow_release_tx: bid.escrow_release_tx.clone(),
+            dispute_reason: bid.dispute_reason.clone(),
             action: bid.action.clone(),
             stablecoin_token: bid.stablecoin_token.to_string(),
         }

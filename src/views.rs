@@ -36,6 +36,17 @@ pub struct PropertyView {
     pub lease_duration_nanos: Option<u64>,
     pub damage_escrow: String, // u128 as string for JSON
     pub active_lease: Option<LeaseView>,
+    pub timestamp: u64,
+    pub sold: Option<SoldView>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, JsonSchema)]
+pub struct SoldView {
+    pub property_id: u64,
+    pub buyer_id: String,
+    pub amount: String, // u128 as string for JSON
+    pub previous_owner_id: String,
+    pub sold_at: u64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -97,6 +108,20 @@ impl From<&Property> for PropertyView {
             lease_duration_nanos: property.lease_duration_months,
             damage_escrow: property.damage_escrow.to_string(),
             active_lease: property.active_lease.as_ref().map(|lease| lease.into()),
+            timestamp: property.timestamp,
+            sold: property.sold.as_ref().map(|sold| sold.into()),
+        }
+    }
+}
+
+impl From<&Sold> for SoldView {
+    fn from(sold: &Sold) -> Self {
+        SoldView {
+            property_id: sold.property_id,
+            buyer_id: sold.buyer_id.to_string(),
+            amount: sold.amount.to_string(),
+            previous_owner_id: sold.previous_owner_id.to_string(),
+            sold_at: sold.sold_at,
         }
     }
 }

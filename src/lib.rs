@@ -246,13 +246,13 @@ impl ShedaContract {
             "StablecoinNotAccepted"
         );
 
-        require!(
-            amount.0 == expected_amount,
-            format!(
-                "IncorrectBidAmount: expected {}, received {}",
-                expected_amount, amount.0
-            )
-        );
+        // require!(
+        //     amount.0 == expected_amount,
+        //     format!(
+        //         "IncorrectBidAmount: expected {}, received {}",
+        //         expected_amount, amount.0
+        //     )
+        // );
 
         //assert the property is fo sale if action is sales and for lease if action is lease
         match bid_action.action {

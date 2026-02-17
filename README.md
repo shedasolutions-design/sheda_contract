@@ -48,7 +48,7 @@ This is the core mechanism for placing bids. Instead of calling a method on this
 **Flow:**
 1.  **User** calls `ft_transfer_call` on the **Stablecoin Contract**.
     *   `receiver_id`: `sheda_contract.near`
-    *   `amount`: The bid amount (must match property price).
+    *   `amount`: The bid amount (any value).
     *   `msg`: A JSON string containing the `BidAction`.
         ```json
         {
@@ -62,7 +62,7 @@ This is the core mechanism for placing bids. Instead of calling a method on this
     *   Parses `msg` to get `property_id` and `action`.
     *   Verifies the stablecoin is in the `accepted_stablecoin` list.
   *   Verifies the `stablecoin_token` in the message matches the token that called `ft_on_transfer`.
-    *   Verifies the transferred `amount` matches the property's `price`.
+    *   Accepts any bid `amount` (price is advisory for frontends).
     *   Verifies the property is listed for the requested action (Sale/Lease).
     *   Creates a `Bid` record stored in the contract.
   *   Sets an expiry timestamp for the bid (configurable).
@@ -89,6 +89,8 @@ If a bid is for a lease:
 -   A `Lease` object is created on the property.
 -   The tenant can `raise_lease_dispute(lease_id)` or `raise_lease_dispute_with_reason(lease_id, reason)`.
 -   Admins can `resolve_dispute(lease_id, winner, payout_amount)` which pays escrow to the winner.
+-   Admins can `vote_lease_dispute(lease_id, vote_for_tenant)` to record votes.
+-   Optional oracle flow: `set_oracle_account(oracle_account)`, `request_oracle_dispute(lease_id)`, then `resolve_dispute_from_oracle(lease_id, payout_amount)`.
 -   Once the duration passes, `expire_lease(lease_id)` can be called.
 -   `cron_check_leases()` can be called by a keeper to expire any overdue leases in bulk.
 
@@ -171,10 +173,15 @@ Owners can update time-based parameters (in nanoseconds) that control bid expiry
 -   `add_supported_stablecoin(token_account)`: Whitelist a stablecoin.
 -   `remove_supported_stablecoin(token_account)`: Remove a stablecoin from whitelist.
 -   `resolve_dispute(lease_id, winner, payout_amount)`: Resolve a lease dispute and pay escrow to the winner.
+-   `resolve_dispute_from_oracle(lease_id, payout_amount)`: Resolve using the oracle result.
+-   `vote_lease_dispute(lease_id, vote_for_tenant)`: Admin vote tracking for disputes.
+-   `set_oracle_account(oracle_account)`: Set the oracle contract (Owner only).
+-   `request_oracle_dispute(lease_id)`: Request an oracle decision (Admin only).
 -   `emergency_withdraw(to_account)`: Withdraw all stablecoins to a specific account (Owner only).
 -   `withdraw_stablecoin(token_account, amount)`: Withdraw specific amount (Owner only).
 -   `refund_bids(property_id)`: Admin manually refunds bids for a property.
 -   `admin_delist_property(property_id)`: Admin force-delist a property.
+ -   `admin_delete_property(property_id)`: Admin delete a property and burn the NFT.
 
 ### View Methods
 -   `get_property_by_id(property_id)`
@@ -192,6 +199,7 @@ Owners can update time-based parameters (in nanoseconds) that control bid expiry
 -   `get_active_leases_count()`
 -   `get_user_stats(account_id)`
 -   `get_property_instance(property_id)`
+-   `get_oracle_account()`
 
 ## How to Build Locally?
 

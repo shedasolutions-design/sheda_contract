@@ -8,13 +8,16 @@ pub mod views;
 pub mod ext;
 #[allow(unused_imports)]
 use crate::models::{Bid, BidStatus, ContractError, DisputeStatus, Lease, Property};
-use crate::events::{emit_event, BidPlacedEvent, PropertyMintedEvent};
+use crate::events::{emit_event, BidPlacedEvent, LostBidClaimedEvent, PropertyMintedEvent};
 use crate::{internal::*, models::Action};
 
 #[allow(unused_imports)]
 use near_contract_standards::non_fungible_token::{
+    approval::NonFungibleTokenApproval,
     core::NonFungibleTokenCore,
+    enumeration::NonFungibleTokenEnumeration,
     metadata::{NFTContractMetadata, TokenMetadata},
+    metadata::NonFungibleTokenMetadataProvider,
     NonFungibleToken, Token,
 };
 use near_sdk::{
@@ -65,6 +68,10 @@ pub struct ShedaContract {
     // Global contract factory
     pub global_contract_code: Option<Vec<u8>>,
     pub property_instances: IterableMap<u64, AccountId>,
+
+    // Dispute oracle
+    pub oracle_account_id: Option<AccountId>,
+    pub oracle_request_nonce: u64,
 
     pub version: u32,
 }
@@ -171,6 +178,71 @@ impl NonFungibleTokenCore for ShedaContract {
     }
 }
 
+#[near]
+impl NonFungibleTokenApproval for ShedaContract {
+    #[payable]
+    fn nft_approve(
+        &mut self,
+        token_id: TokenId,
+        account_id: AccountId,
+        msg: Option<String>,
+    ) -> Option<near_sdk::Promise> {
+        self.tokens.nft_approve(token_id, account_id, msg)
+    }
+
+    #[payable]
+    fn nft_revoke(&mut self, token_id: TokenId, account_id: AccountId) {
+        self.tokens.nft_revoke(token_id, account_id)
+    }
+
+    #[payable]
+    fn nft_revoke_all(&mut self, token_id: TokenId) {
+        self.tokens.nft_revoke_all(token_id)
+    }
+
+    fn nft_is_approved(
+        &self,
+        token_id: TokenId,
+        approved_account_id: AccountId,
+        approval_id: Option<u64>,
+    ) -> bool {
+        self.tokens
+            .nft_is_approved(token_id, approved_account_id, approval_id)
+    }
+}
+
+#[near]
+impl NonFungibleTokenEnumeration for ShedaContract {
+    fn nft_total_supply(&self) -> U128 {
+        self.tokens.nft_total_supply()
+    }
+
+    fn nft_tokens(&self, from_index: Option<U128>, limit: Option<u64>) -> Vec<Token> {
+        self.tokens.nft_tokens(from_index, limit)
+    }
+
+    fn nft_supply_for_owner(&self, account_id: AccountId) -> U128 {
+        self.tokens.nft_supply_for_owner(account_id)
+    }
+
+    fn nft_tokens_for_owner(
+        &self,
+        account_id: AccountId,
+        from_index: Option<U128>,
+        limit: Option<u64>,
+    ) -> Vec<Token> {
+        self.tokens
+            .nft_tokens_for_owner(account_id, from_index, limit)
+    }
+}
+
+#[near]
+impl NonFungibleTokenMetadataProvider for ShedaContract {
+    fn nft_metadata(&self) -> NFTContractMetadata {
+        self.metadata.get().expect("Metadata not found")
+    }
+}
+
 impl HasNew for NFTContractMetadata {
     fn new(media_url: String) -> Self {
         Self {
@@ -196,6 +268,22 @@ impl ShedaContract {
     fn checked_sub_u128(left: u128, right: u128, label: &str) -> u128 {
         left.checked_sub(right)
             .unwrap_or_else(|| env::panic_str(&format!("Underflow in {}", label)))
+    }
+
+    fn checked_add_u64(left: u64, right: u64, label: &str) -> u64 {
+        left.checked_add(right)
+            .unwrap_or_else(|| env::panic_str(&format!("Overflow in {}", label)))
+    }
+
+    fn assert_owner(&self) {
+        require!(
+            env::predecessor_account_id() == self.owner_id,
+            "Only owner can call"
+        );
+    }
+
+    fn assert_admin(&self) {
+        require!(self.admins.contains(&env::predecessor_account_id()), "UnauthorizedAccess");
     }
 
     //set required init parameters here
@@ -232,6 +320,8 @@ impl ShedaContract {
             lost_bid_claim_delay_ns: 24 * 60 * 60 * 1_000_000_000,
             global_contract_code: None,
             property_instances: IterableMap::new(b"pi".to_vec()),
+            oracle_account_id: None,
+            oracle_request_nonce: 0,
             version: 2,
         };
         this.admins.insert(owner_id);
@@ -316,6 +406,8 @@ impl ShedaContract {
             lost_bid_claim_delay_ns: 24 * 60 * 60 * 1_000_000_000,
             global_contract_code: None,
             property_instances: IterableMap::new(b"pi".to_vec()),
+            oracle_account_id: None,
+            oracle_request_nonce: 0,
             version: 2,
         };
 
@@ -325,10 +417,7 @@ impl ShedaContract {
     /// Owner-only contract upgrade entrypoint.
     #[payable]
     pub fn upgrade_self(&mut self, code: Base64VecU8) -> near_sdk::Promise {
-        require!(
-            env::predecessor_account_id() == self.owner_id,
-            "Only owner can upgrade"
-        );
+        self.assert_owner();
         require!(env::attached_deposit().as_yoctonear() > 0, "Attach deposit");
 
         Promise::new(env::current_account_id())
@@ -339,10 +428,7 @@ impl ShedaContract {
     /// Store global contract code bytes for per-property instances.
     #[payable]
     pub fn set_global_contract_code(&mut self, code: Base64VecU8) {
-        require!(
-            env::predecessor_account_id() == self.owner_id,
-            "Only owner can set global code"
-        );
+        self.assert_owner();
         require!(env::attached_deposit().as_yoctonear() > 0, "Attach deposit");
         self.global_contract_code = Some(code.0);
     }
@@ -354,10 +440,7 @@ impl ShedaContract {
         escrow_release_delay_ns: u64,
         lost_bid_claim_delay_ns: u64,
     ) {
-        require!(
-            env::predecessor_account_id() == self.owner_id,
-            "Only owner can update config"
-        );
+        self.assert_owner();
         self.bid_expiry_ns = bid_expiry_ns;
         self.escrow_release_delay_ns = escrow_release_delay_ns;
         self.lost_bid_claim_delay_ns = lost_bid_claim_delay_ns;
@@ -366,10 +449,7 @@ impl ShedaContract {
     /// Deploy a per-property instance under a subaccount.
     #[payable]
     pub fn create_property_instance(&mut self, property_id: u64) -> Promise {
-        require!(
-            env::predecessor_account_id() == self.owner_id,
-            "Only owner can create instances"
-        );
+        self.assert_owner();
         require!(
             self.properties.get(&property_id).is_some(),
             "Property not found"
@@ -434,7 +514,7 @@ impl ShedaContract {
     ) -> u64 {
         // 1. Calculate IDs
         let property_id = self.property_counter;
-        self.property_counter += 1;
+        self.property_counter = Self::checked_add_u64(self.property_counter, 1, "property_counter");
         let token_id_str = property_id.to_string(); // NEP-171 requires String IDs
 
         let owner_id = env::predecessor_account_id();
@@ -507,15 +587,15 @@ impl ShedaContract {
         let bid_action: models::BidAction =
             serde_json::from_str::<models::BidAction>(&msg).expect("Invalid BidAction");
         let property_id = bid_action.property_id;
+        let sender_id_guard = sender_id.clone();
+
 
         let property = self
             .properties
             .get(&property_id)
             .expect("Property not found");
 
-        // Check if the amount matches the price for sale or lease
-        #[allow(unused_variables)]
-        let expected_amount = property.price;
+        // Amount can be any value; price is advisory for frontends.
 
         require!(
             self.accepted_stablecoin
@@ -528,13 +608,6 @@ impl ShedaContract {
             "StablecoinMismatch"
         );
 
-        require!(
-            amount.0 == expected_amount,
-            format!(
-                "IncorrectBidAmount: expected {}, received {}",
-                expected_amount, amount.0
-            )
-        );
 
         //assert the property is fo sale if action is sales and for lease if action is lease
         match bid_action.action {
@@ -551,7 +624,7 @@ impl ShedaContract {
 
         // Amount matches, create the bid
         let bid_id = self.bid_counter;
-        self.bid_counter += 1;
+        self.bid_counter = Self::checked_add_u64(self.bid_counter, 1, "bid_counter");
 
         // Assuming Bid struct has fields: id, property_id, bidder, amount, etc.
         // Adjust based on actual Bid struct definition
@@ -578,6 +651,8 @@ impl ShedaContract {
             stablecoin_token: env::predecessor_account_id(),
         };
 
+        internal::lock_ft_on_transfer(self, property_id, &sender_id_guard);
+
         emit_event(
             "BidPlaced",
             BidPlacedEvent {
@@ -603,6 +678,7 @@ impl ShedaContract {
         );
 
         // Returning 0 means: keep all tokens, no refund
+        internal::unlock_ft_on_transfer(self, property_id, &sender_id_guard);
         U128(0)
     }
 
@@ -730,7 +806,6 @@ impl ShedaContract {
     // Allow bidders to manually claim/withdraw their bid that was not accepted
     #[payable]
     pub fn claim_lost_bid(&mut self, bid_id: u64, property_id: u64) -> near_sdk::Promise {
-        internal::lock_bid(self, property_id, bid_id);
         let bids = self.bids.get(&property_id).expect("No bids for this property");
         
         let bid = bids
@@ -784,6 +859,8 @@ impl ShedaContract {
             );
         }
 
+        internal::lock_bid(self, property_id, bid_id);
+
         // Refund the bid amount
         let promise = crate::ext::ft_contract::ext(bid.stablecoin_token.clone())
             .with_attached_deposit(near_sdk::NearToken::from_yoctonear(1))
@@ -813,6 +890,12 @@ impl ShedaContract {
         internal::unlock_bid(self, property_id, bid_id);
         match env::promise_result(0) {
             near_sdk::PromiseResult::Successful(_) => {
+                let bidder_id = self
+                    .bids
+                    .get(&property_id)
+                    .and_then(|bids| bids.iter().find(|bid| bid.id == bid_id))
+                    .map(|bid| bid.bidder.clone())
+                    .unwrap_or_else(|| env::predecessor_account_id());
                 if let Some(bids) = self.bids.get_mut(&property_id) {
                     let _ = internal::update_bid_in_list(bids, bid_id, |bid| {
                         bid.status = crate::models::BidStatus::Cancelled;
@@ -821,6 +904,16 @@ impl ShedaContract {
                 }
 
                 near_sdk::log!("Bid {} claimed and marked cancelled", bid_id);
+
+                emit_event(
+                    "LostBidClaimed",
+                    LostBidClaimedEvent {
+                        token_id: property_id,
+                        bid_id,
+                        bidder_id,
+                        amount,
+                    },
+                );
             }
             near_sdk::PromiseResult::Failed => {
                 // Revert the balance update if transfer failed

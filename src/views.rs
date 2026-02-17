@@ -263,6 +263,10 @@ impl ShedaContract {
         )
     }
 
+    pub fn get_oracle_account(&self) -> Option<AccountId> {
+        self.oracle_account_id.clone()
+    }
+
     //NOTE Poperty Owner specific
     pub fn get_my_properties(&mut self) -> Vec<PropertyView> {
         let caller = env::signer_account_id();

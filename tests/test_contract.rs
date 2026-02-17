@@ -270,7 +270,7 @@ async fn test_unsupported_stablecoin_rejected() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_incorrect_bid_amount() -> anyhow::Result<()> {
+async fn test_bid_amount_any_value() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
     let contract_wasm = std::fs::read(WASM_FILEPATH)?;
     let contract = worker.dev_deploy(&contract_wasm).await?;
@@ -304,7 +304,7 @@ async fn test_incorrect_bid_amount() -> anyhow::Result<()> {
 
     let property_id: u64 = outcome.json()?;
 
-    // Try to bid with incorrect amount
+    // Try to bid with any amount (not necessarily equal to price)
     let outcome = stablecoin
         .call(contract.id(), "ft_on_transfer")
         .args_json(json!({
@@ -319,9 +319,16 @@ async fn test_incorrect_bid_amount() -> anyhow::Result<()> {
         .transact()
         .await?;
 
-    //assert!(outcome.is_failure(), "Should fail for incorrect amount");
+    assert!(outcome.is_success(), "Bid should accept any amount");
 
-    println!("✅ Incorrect bid amount test passed");
+    let bids: Vec<serde_json::Value> = contract
+        .view("get_bids_for_property")
+        .args_json(json!({ "property_id": property_id }))
+        .await?
+        .json()?;
+    assert_eq!(bids.len(), 1, "Bid should be recorded");
+
+    println!("✅ Bid amount any value test passed");
     Ok(())
 }
 

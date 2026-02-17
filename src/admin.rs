@@ -4,13 +4,14 @@ use crate::internal::extract_base_uri;
 use crate::{HasNew, models::*};
 use crate::views::LeaseView;
 use crate::events::{
-    emit_event, AdminAddedEvent, AdminRemovedEvent, DisputeResolvedEvent,
-    EmergencyWithdrawalEvent,
+    emit_event, AdminAddedEvent, AdminRemovedEvent, BidRefundedEvent,
+    DisputeResolvedEvent, EmergencyWithdrawalEvent, PropertyDeletedEvent,
+    PropertyDelistedEvent, StablecoinWithdrawnEvent,
 };
 use crate::{models::ContractError, ShedaContract, ShedaContractExt};
 use near_contract_standards::non_fungible_token::metadata::NFTContractMetadata;
 use near_sdk::json_types::U128;
-use near_sdk::{env, log, near_bindgen, AccountId, Gas, NearToken, PromiseResult};
+use near_sdk::{env, log, near_bindgen, require, AccountId, Gas, NearToken, Promise, PromiseResult};
 
 fn checked_add_u128(left: u128, right: u128, label: &str) -> u128 {
     left.checked_add(right)
@@ -24,51 +25,7 @@ fn checked_sub_u128(left: u128, right: u128, label: &str) -> u128 {
 
 #[near_bindgen]
 impl ShedaContract {
-
-    #[payable]
-    pub fn add_admin(&mut self, new_admin_id: AccountId) {
-        //check caller is an admin
-        assert!(
-            self.admins.contains(&env::signer_account_id()),
-            "account is not an admin"
-        );
-        self.admins.insert(new_admin_id.clone());
-        log!("Admin {} added", new_admin_id);
-        emit_event(
-            "AdminAdded",
-            AdminAddedEvent {
-                admin_id: new_admin_id,
-                added_by: env::signer_account_id(),
-            },
-        );
-    }
-
-    #[payable]
-    pub fn remove_admin(&mut self, admin_id: AccountId) {
-        //check caller is the owner
-        assert_eq!(
-            env::signer_account_id(),
-            self.owner_id,
-            "Only owner can remove admins"
-        );
-        self.admins.remove(&admin_id);
-        log!("Admin {} removed", admin_id);
-        emit_event(
-            "AdminRemoved",
-            AdminRemovedEvent {
-                admin_id: admin_id.clone(),
-                removed_by: env::signer_account_id(),
-            },
-        );
-    }
-
-    pub fn is_admin(&self, account_id: AccountId) -> bool {
-        self.admins.contains(&account_id)
-    }
-
-    #[handle_result]
-    #[payable]
-    pub fn resolve_dispute(
+    fn resolve_dispute_payout(
         &mut self,
         lease_id: u64,
         winner: DisputeWinner,
@@ -83,11 +40,6 @@ impl ShedaContract {
         if lease.dispute_status != DisputeStatus::Raised {
             return Err(ContractError::DisputeAlreadyRaised);
         };
-
-        assert!(
-            self.is_admin(env::signer_account_id()),
-            "UnauthorizedAccess"
-        );
 
         let recipient = match winner {
             DisputeWinner::Tenant => lease.tenant_id.clone(),
@@ -143,13 +95,72 @@ impl ShedaContract {
         Ok(())
     }
 
+    #[payable]
+    pub fn add_admin(&mut self, new_admin_id: AccountId) {
+        self.assert_admin();
+        self.admins.insert(new_admin_id.clone());
+        log!("Admin {} added", new_admin_id);
+        emit_event(
+            "AdminAdded",
+            AdminAddedEvent {
+                admin_id: new_admin_id,
+                added_by: env::signer_account_id(),
+            },
+        );
+    }
+
+    #[payable]
+    pub fn remove_admin(&mut self, admin_id: AccountId) {
+        self.assert_owner();
+        self.admins.remove(&admin_id);
+        log!("Admin {} removed", admin_id);
+        emit_event(
+            "AdminRemoved",
+            AdminRemovedEvent {
+                admin_id: admin_id.clone(),
+                removed_by: env::signer_account_id(),
+            },
+        );
+    }
+
+    pub fn is_admin(&self, account_id: AccountId) -> bool {
+        self.admins.contains(&account_id)
+    }
+
+    #[handle_result]
+    #[payable]
+    pub fn resolve_dispute(
+        &mut self,
+        lease_id: u64,
+        winner: DisputeWinner,
+        payout_amount: U128,
+    ) -> Result<(), ContractError> {
+        self.assert_admin();
+        self.resolve_dispute_payout(lease_id, winner, payout_amount)
+    }
+
+    #[handle_result]
+    #[payable]
+    pub fn resolve_dispute_from_oracle(
+        &mut self,
+        lease_id: u64,
+        payout_amount: U128,
+    ) -> Result<(), ContractError> {
+        self.assert_admin();
+        let lease = self
+            .leases
+            .get(&lease_id)
+            .cloned()
+            .ok_or(ContractError::LeaseNotFound)?;
+        let info = lease.dispute.ok_or(ContractError::DisputeAlreadyRaised)?;
+        let winner = info.oracle_result.ok_or(ContractError::DisputeAlreadyRaised)?;
+        self.resolve_dispute_payout(lease_id, winner, payout_amount)
+    }
+
 
     #[payable]
     pub fn get_leases_with_disputes(&mut self) -> Vec<LeaseView> {
-        assert!(
-            self.is_admin(env::signer_account_id()),
-            "UnauthorizedAccess"
-        );
+        self.assert_admin();
         log!("Admin {}", env::signer_account_id());
         self.leases
             .values()
@@ -159,12 +170,121 @@ impl ShedaContract {
     }
 
     #[payable]
-    pub fn add_supported_stablecoin(&mut self, token_account: AccountId) {
-        assert_eq!(
-            env::signer_account_id(),
-            self.owner_id,
-            "Only owner can add supported stablecoins"
+    pub fn vote_lease_dispute(&mut self, lease_id: u64, vote_for_tenant: bool) {
+        self.assert_admin();
+        let mut lease = self
+            .leases
+            .get(&lease_id)
+            .cloned()
+            .expect("Lease not found");
+
+        require!(
+            lease.dispute_status == DisputeStatus::Raised,
+            "Dispute not active"
         );
+
+        let mut info = lease.dispute.unwrap_or(DisputeInfo {
+            raised_by: lease.tenant_id.clone(),
+            raised_at: env::block_timestamp(),
+            reason: "".to_string(),
+            votes_for_tenant: 0,
+            votes_for_owner: 0,
+            oracle_result: None,
+            oracle_request_id: None,
+            oracle_updated_at: None,
+            resolved_by: None,
+            resolved_at: None,
+        });
+
+        if vote_for_tenant {
+            info.votes_for_tenant = info.votes_for_tenant.saturating_add(1);
+        } else {
+            info.votes_for_owner = info.votes_for_owner.saturating_add(1);
+        }
+
+        lease.dispute = Some(info);
+        self.leases.insert(lease_id, lease);
+    }
+
+    #[payable]
+    pub fn set_oracle_account(&mut self, oracle_account: AccountId) {
+        self.assert_owner();
+        self.oracle_account_id = Some(oracle_account);
+    }
+
+    #[payable]
+    pub fn request_oracle_dispute(&mut self, lease_id: u64) -> Promise {
+        self.assert_admin();
+        let oracle = self
+            .oracle_account_id
+            .clone()
+            .expect("Oracle account not set");
+
+        let mut lease = self
+            .leases
+            .get(&lease_id)
+            .cloned()
+            .expect("Lease not found");
+        let property_id = lease.property_id;
+
+        require!(
+            lease.dispute_status == DisputeStatus::Raised,
+            "Dispute not active"
+        );
+
+        self.oracle_request_nonce = self.oracle_request_nonce.saturating_add(1);
+        let request_id = self.oracle_request_nonce;
+
+        let mut info = lease.dispute.unwrap_or(DisputeInfo {
+            raised_by: lease.tenant_id.clone(),
+            raised_at: env::block_timestamp(),
+            reason: "".to_string(),
+            votes_for_tenant: 0,
+            votes_for_owner: 0,
+            oracle_result: None,
+            oracle_request_id: None,
+            oracle_updated_at: None,
+            resolved_by: None,
+            resolved_at: None,
+        });
+        info.oracle_request_id = Some(request_id);
+        lease.dispute = Some(info);
+        self.leases.insert(lease_id, lease);
+
+        let promise = dispute_oracle::ext(oracle)
+            .with_static_gas(Gas::from_tgas(20))
+            .resolve_dispute(lease_id, property_id);
+
+        promise.then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(Gas::from_tgas(10))
+                .on_oracle_dispute_callback(lease_id, request_id),
+        )
+    }
+
+    #[private]
+    pub fn on_oracle_dispute_callback(&mut self, lease_id: u64, request_id: u64) {
+        match env::promise_result(0) {
+            PromiseResult::Successful(value) => {
+                if let Ok(winner) = near_sdk::serde_json::from_slice::<DisputeWinner>(&value) {
+                    if let Some(mut lease) = self.leases.get(&lease_id).cloned() {
+                        if let Some(info) = lease.dispute.as_mut() {
+                            if info.oracle_request_id == Some(request_id) {
+                                info.oracle_result = Some(winner);
+                                info.oracle_updated_at = Some(env::block_timestamp());
+                                self.leases.insert(lease_id, lease);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => log!("Oracle dispute callback failed"),
+        }
+    }
+
+    #[payable]
+    pub fn add_supported_stablecoin(&mut self, token_account: AccountId) {
+        self.assert_owner();
         if !self.accepted_stablecoin.contains(&token_account) {
             self.accepted_stablecoin.push(token_account.clone());
             self.stable_coin_balances
@@ -180,12 +300,7 @@ impl ShedaContract {
     //withdraw supported stablecoin from contract
     #[payable]
     pub fn emergency_withdraw(&mut self, to_account: AccountId) {
-        //get balances from contract struct
-        assert_eq!(
-            env::signer_account_id(),
-            self.owner_id,
-            "Only owner can perform emergency withdrawal"
-        );
+        self.assert_owner();
         let supported_stables = self.accepted_stablecoin.clone();
         for token in supported_stables.iter() {
             let balance = *self.stable_coin_balances.get(token).unwrap_or(&0);
@@ -242,11 +357,7 @@ impl ShedaContract {
     }
 
     pub fn remove_supported_stablecoin(&mut self, token_account: AccountId) {
-        assert_eq!(
-            env::signer_account_id(),
-            self.owner_id,
-            "Only owner can remove supported stablecoins"
-        );
+        self.assert_owner();
         let balance = *self.stable_coin_balances.get(&token_account).unwrap_or(&0);
         assert_eq!(balance, 0, "Stablecoin balance must be zero to remove");
         if let Some(index) = self
@@ -264,11 +375,7 @@ impl ShedaContract {
     }
 
     pub fn withdraw_stablecoin(&mut self, token_account: AccountId, amount: u128) {
-        assert_eq!(
-            env::signer_account_id(),
-            self.owner_id,
-            "Only owner can withdraw stablecoins"
-        );
+        self.assert_owner();
         let balance = *self.stable_coin_balances.get(&token_account).unwrap_or(&0);
         assert!(balance >= amount, "Insufficient balance for withdrawal");
         
@@ -296,14 +403,20 @@ impl ShedaContract {
             token_account,
             env::signer_account_id()
         );
+
+        emit_event(
+            "StablecoinWithdrawn",
+            StablecoinWithdrawnEvent {
+                token_id: token_account,
+                amount,
+                recipient: env::signer_account_id(),
+            },
+        );
     }
 
     #[payable]
     pub fn refund_bids(&mut self, property_id: u64) {
-        assert!(
-            self.is_admin(env::signer_account_id()),
-            "UnauthorizedAccess"
-        );
+        self.assert_admin();
         if let Some(bids) = self.bids.get_mut(&property_id) {
             for bid in bids.iter_mut() {
                 if bid.status != BidStatus::Pending {
@@ -346,15 +459,23 @@ impl ShedaContract {
                     property_id,
                     env::signer_account_id()
                 );
+
+                emit_event(
+                    "BidRefunded",
+                    BidRefundedEvent {
+                        token_id: property_id,
+                        bid_id: bid.id,
+                        bidder_id: bidder,
+                        amount,
+                        reason: "admin_refund".to_string(),
+                    },
+                );
             }
         }
     }
 
     pub fn admin_delist_property(&mut self, property_id: u64) {
-        assert!(
-            self.is_admin(env::signer_account_id()),
-            "UnauthorizedAccess"
-        );
+        self.assert_admin();
         //Check that property is not sold or leased
         let mut property = self
             .properties
@@ -383,14 +504,19 @@ impl ShedaContract {
             property_id,
             env::signer_account_id()
         );
+
+        emit_event(
+            "PropertyDelisted",
+            PropertyDelistedEvent {
+                token_id: property_id,
+                admin_id: env::signer_account_id(),
+            },
+        );
     }
 
     #[payable]
     pub fn admin_delete_property(&mut self, property_id: u64) {
-        assert!(
-            self.is_admin(env::signer_account_id()),
-            "UnauthorizedAccess"
-        );
+        self.assert_admin();
         let property = self
             .properties
             .get(&property_id)
@@ -416,16 +542,21 @@ impl ShedaContract {
             env::signer_account_id()
         );
 
+        emit_event(
+            "PropertyDeleted",
+            PropertyDeletedEvent {
+                token_id: property_id,
+                admin_id: env::signer_account_id(),
+            },
+        );
+
         //burn the NFT
         crate::internal::burn_nft(self, property_id.to_string());
     }
 
     #[payable]
     pub fn admin_change_nft_metadata(&mut self, image_url: String, name: String, symbol:String) {
-        assert!(
-            self.is_admin(env::signer_account_id()),
-            "UnauthorizedAccess"
-        );
+        self.assert_admin();
         let new_metadata = NFTContractMetadata {
             spec: "nft-1.0.0".to_string(),
             name: name,

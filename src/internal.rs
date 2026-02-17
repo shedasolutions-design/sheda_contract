@@ -4,7 +4,8 @@ use near_sdk::{assert_one_yocto, env, json_types::U128, log, require, AccountId,
 use crate::{
     ext::ft_contract,
     events::{
-        emit_event, BidApprovedEvent, DealFinalizedEvent, DisputeRaisedEvent, LeaseExpiredEvent,
+        emit_event, BidApprovedEvent, BidCancelledEvent, BidRefundedEvent, BidRejectedEvent,
+        DealFinalizedEvent, DisputeRaisedEvent, LeaseExpiredEvent,
     },
     models::{Action, Bid, BidStatus},
     ShedaContract,
@@ -34,6 +35,10 @@ fn bid_lock_key(property_id: u64, bid_id: u64) -> String {
     format!("bid:{}:{}", property_id, bid_id)
 }
 
+fn ft_lock_key(property_id: u64, account_id: &AccountId) -> String {
+    format!("ft:{}:{}", account_id, property_id)
+}
+
 pub fn lock_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) {
     let key = bid_lock_key(property_id, bid_id);
     require!(
@@ -45,6 +50,24 @@ pub fn lock_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) {
 
 pub fn unlock_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) {
     let key = bid_lock_key(property_id, bid_id);
+    contract.reentrancy_locks.remove(&key);
+}
+
+pub fn lock_ft_on_transfer(contract: &mut ShedaContract, property_id: u64, account_id: &AccountId) {
+    let key = ft_lock_key(property_id, account_id);
+    require!(
+        !contract.reentrancy_locks.contains(&key),
+        "ReentrancyGuard: ft_on_transfer locked"
+    );
+    contract.reentrancy_locks.insert(key);
+}
+
+pub fn unlock_ft_on_transfer(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    account_id: &AccountId,
+) {
+    let key = ft_lock_key(property_id, account_id);
     contract.reentrancy_locks.remove(&key);
 }
 
@@ -330,7 +353,11 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
                     };
                     updated_property.active_lease = Some(lease.clone());
                     contract.leases.insert(lease.id, lease);
-                    contract.lease_counter += 1;
+                    contract.lease_counter = checked_add_u64(
+                        contract.lease_counter,
+                        1,
+                        "lease_counter",
+                    );
                     contract.properties.insert(property_id, updated_property);
 
                     emit_event(
@@ -439,6 +466,16 @@ pub fn internal_reject_bid(contract: &mut ShedaContract, property_id: u64, bid_i
             bid.updated_at = env::block_timestamp();
         });
     }
+
+    emit_event(
+        "BidRejected",
+        BidRejectedEvent {
+            token_id: property_id,
+            bid_id,
+            bidder_id: bid.bidder,
+            amount: bid.amount,
+        },
+    );
 }
 
 pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) {
@@ -504,6 +541,16 @@ pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_i
             bid.updated_at = env::block_timestamp();
         });
     }
+
+    emit_event(
+        "BidCancelled",
+        BidCancelledEvent {
+            token_id: property_id,
+            bid_id,
+            bidder_id: bid.bidder,
+            amount: bid.amount,
+        },
+    );
 }
 
 pub fn internal_accept_bid_with_escrow(
@@ -557,6 +604,18 @@ pub fn internal_accept_bid_with_escrow(
         "Bid is not for the specified property"
     );
 
+    emit_event(
+        "BidApproved",
+        BidApprovedEvent {
+            token_id: property_id,
+            bidder_id: bid.bidder.clone(),
+            seller_id: property.owner_id.clone(),
+            amount: bid.amount,
+        },
+    );
+
+    lock_bid(contract, property_id, bid_id);
+
     if let Some(bids) = contract.bids.get_mut(&property_id) {
         for other_bid in bids.iter_mut() {
             if other_bid.id == bid_id || other_bid.status != BidStatus::Pending {
@@ -588,6 +647,8 @@ pub fn internal_accept_bid_with_escrow(
             other_bid.updated_at = env::block_timestamp();
         }
     }
+
+    unlock_bid(contract, property_id, bid_id);
 
     true
 }
@@ -787,7 +848,11 @@ pub fn release_escrow_callback(contract: &mut ShedaContract, property_id: u64, b
                     };
                     updated_property.active_lease = Some(lease.clone());
                     contract.leases.insert(lease.id, lease);
-                    contract.lease_counter += 1;
+                    contract.lease_counter = checked_add_u64(
+                        contract.lease_counter,
+                        1,
+                        "lease_counter",
+                    );
                     contract.properties.insert(property_id, updated_property);
                 }
             }
@@ -950,6 +1015,11 @@ pub fn refund_escrow_timeout_callback(
     unlock_bid(contract, property_id, bid_id);
     match env::promise_result(0) {
         PromiseResult::Successful(_) => {
+            let bidder_id = contract
+                .bids
+                .get(&property_id)
+                .map(|bids| get_bid_from_list(bids, bid_id).bidder)
+                .unwrap_or_else(|| env::predecessor_account_id());
             if let Some(bids) = contract.bids.get_mut(&property_id) {
                 let _ = update_bid_in_list(bids, bid_id, |bid| {
                     bid.status = BidStatus::Cancelled;
@@ -957,6 +1027,17 @@ pub fn refund_escrow_timeout_callback(
                     bid.escrow_release_tx = Some(format!("refund:{}", env::block_height()));
                 });
             }
+
+            emit_event(
+                "BidRefunded",
+                BidRefundedEvent {
+                    token_id: property_id,
+                    bid_id,
+                    bidder_id,
+                    amount,
+                    reason: "escrow_timeout".to_string(),
+                },
+            );
         }
         PromiseResult::Failed => {
             let current_balance = *contract
@@ -1070,6 +1151,8 @@ pub fn internal_raise_dispute(contract: &mut ShedaContract, lease_id: u64, reaso
         votes_for_tenant: 0,
         votes_for_owner: 0,
         oracle_result: None,
+        oracle_request_id: None,
+        oracle_updated_at: None,
         resolved_by: None,
         resolved_at: None,
     });

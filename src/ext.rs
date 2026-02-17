@@ -3,6 +3,7 @@ use near_sdk::json_types::U128;
 use near_sdk::{ext_contract, AccountId};
 
 use crate::TokenId;
+use crate::models::DisputeWinner;
 
 // FT interface for cross-contract calls for near sdk
 #[allow(dead_code)]
@@ -23,4 +24,11 @@ trait NFT {
 #[ext_contract(property_instance)]
 trait PropertyInstance {
     fn new(owner_id: AccountId, property_id: u64, escrow_token: AccountId);
+}
+
+// Oracle interface for dispute resolution
+#[allow(dead_code)]
+#[ext_contract(dispute_oracle)]
+trait DisputeOracle {
+    fn resolve_dispute(&self, lease_id: u64, property_id: u64) -> DisputeWinner;
 }

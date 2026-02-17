@@ -32,6 +32,8 @@ pub struct DisputeInfo {
     pub votes_for_tenant: u64,
     pub votes_for_owner: u64,
     pub oracle_result: Option<DisputeWinner>,
+    pub oracle_request_id: Option<u64>,
+    pub oracle_updated_at: Option<Timestamp>,
     pub resolved_by: Option<AccountId>,
     pub resolved_at: Option<Timestamp>,
 }
@@ -44,6 +46,8 @@ pub struct DisputeInfoView {
     pub votes_for_tenant: u64,
     pub votes_for_owner: u64,
     pub oracle_result: Option<DisputeWinner>,
+    pub oracle_request_id: Option<u64>,
+    pub oracle_updated_at: Option<Timestamp>,
     pub resolved_by: Option<String>,
     pub resolved_at: Option<Timestamp>,
 }
@@ -283,6 +287,8 @@ impl From<&DisputeInfo> for DisputeInfoView {
             votes_for_tenant: info.votes_for_tenant,
             votes_for_owner: info.votes_for_owner,
             oracle_result: info.oracle_result.clone(),
+            oracle_request_id: info.oracle_request_id,
+            oracle_updated_at: info.oracle_updated_at,
             resolved_by: info.resolved_by.as_ref().map(|id| id.to_string()),
             resolved_at: info.resolved_at,
         }

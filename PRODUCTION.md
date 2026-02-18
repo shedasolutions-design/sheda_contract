@@ -45,7 +45,10 @@ This guide provides recommendations for deploying the Sheda Contract to NEAR mai
 cargo install wasm-opt
 
 # Build release WASM
-./build.sh
+cargo near build
+
+# Optimize WASM size
+wasm-opt -Oz -o target/near/sheda_contract.wasm target/near/sheda_contract.wasm
 
 # Verify WASM size (should be < 500KB for efficient deployment)
 ls -lh target/near/sheda_contract.wasm

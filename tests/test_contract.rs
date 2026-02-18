@@ -156,7 +156,10 @@ async fn test_upgrade_proposal_sets_status() -> anyhow::Result<()> {
     assert!(outcome.is_success(), "Upgrade proposal should succeed");
 
     let status: (Option<u64>, u64) = contract.view("get_upgrade_status").await?.json()?;
-    assert!(status.0.is_some(), "Pending upgrade timestamp should be set");
+    assert!(
+        status.0.is_some(),
+        "Pending upgrade timestamp should be set"
+    );
 
     println!("✅ Upgrade proposal status test passed");
     Ok(())
@@ -792,10 +795,7 @@ async fn test_set_oracle_account() -> anyhow::Result<()> {
     assert!(outcome.is_success(), "Set oracle should succeed");
 
     // Verify oracle is set
-    let oracle: Option<String> = contract
-        .view("get_oracle_account")
-        .await?
-        .json()?;
+    let oracle: Option<String> = contract.view("get_oracle_account").await?.json()?;
 
     assert!(oracle.is_some(), "Oracle should be set");
     assert_eq!(oracle.unwrap(), oracle_account.id().to_string());
@@ -845,7 +845,10 @@ async fn test_vote_lease_dispute_admin_only() -> anyhow::Result<()> {
         .transact()
         .await?;
 
-    assert!(outcome.is_failure(), "Non-admin should not vote on disputes");
+    assert!(
+        outcome.is_failure(),
+        "Non-admin should not vote on disputes"
+    );
 
     println!("✅ Vote dispute admin-only test passed");
     Ok(())
@@ -860,7 +863,11 @@ async fn test_set_time_lock_config_owner_only() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
     let (contract, owner, user) = init_contract(&worker).await?;
 
-    let new_config = (3600_000_000_000u64, 7200_000_000_000u64, 14400_000_000_000u64);
+    let new_config = (
+        3600_000_000_000u64,
+        7200_000_000_000u64,
+        14400_000_000_000u64,
+    );
 
     // Owner can set config
     let outcome = owner
@@ -886,7 +893,10 @@ async fn test_set_time_lock_config_owner_only() -> anyhow::Result<()> {
         .transact()
         .await?;
 
-    assert!(outcome.is_failure(), "Non-owner should not set timelock config");
+    assert!(
+        outcome.is_failure(),
+        "Non-owner should not set timelock config"
+    );
 
     println!("✅ Timelock config owner-only test passed");
     Ok(())
@@ -928,7 +938,10 @@ async fn test_upgrade_delay_enforcement() -> anyhow::Result<()> {
         .transact()
         .await?;
 
-    assert!(outcome.is_failure(), "Apply upgrade should fail before delay expires");
+    assert!(
+        outcome.is_failure(),
+        "Apply upgrade should fail before delay expires"
+    );
 
     println!("✅ Upgrade delay enforcement test passed");
     Ok(())
@@ -961,10 +974,7 @@ async fn test_ft_on_transfer_reentrancy_protection() -> anyhow::Result<()> {
     let property_id: u64 = outcome.json()?;
 
     // Get supported stablecoin
-    let stablecoins: Vec<String> = contract
-        .view("supported_stablecoins")
-        .await?
-        .json()?;
+    let stablecoins: Vec<String> = contract.view("supported_stablecoins").await?.json()?;
     let stablecoin_id = AccountId::from_str(&stablecoins[0])?;
 
     // First ft_on_transfer call
@@ -1087,10 +1097,7 @@ async fn test_full_lease_lifecycle_with_dispute() -> anyhow::Result<()> {
     let property_id: u64 = outcome.json()?;
 
     // Step 2: User places bid with Lease action
-    let stablecoins: Vec<String> = contract
-        .view("supported_stablecoins")
-        .await?
-        .json()?;
+    let stablecoins: Vec<String> = contract.view("supported_stablecoins").await?.json()?;
     let stablecoin_id = AccountId::from_str(&stablecoins[0])?;
 
     let outcome = user
@@ -1129,7 +1136,10 @@ async fn test_full_lease_lifecycle_with_dispute() -> anyhow::Result<()> {
         .transact()
         .await?;
 
-    assert!(outcome.is_success(), "Accept bid with escrow should succeed");
+    assert!(
+        outcome.is_success(),
+        "Accept bid with escrow should succeed"
+    );
 
     // Step 4: Verify lease was created
     let lease_counter: u64 = contract.view("get_lease_counter").await?.json()?;
@@ -1195,10 +1205,7 @@ async fn test_full_purchase_flow() -> anyhow::Result<()> {
     let property_id: u64 = outcome.json()?;
 
     // Step 2: User places purchase bid
-    let stablecoins: Vec<String> = contract
-        .view("supported_stablecoins")
-        .await?
-        .json()?;
+    let stablecoins: Vec<String> = contract.view("supported_stablecoins").await?.json()?;
     let stablecoin_id = AccountId::from_str(&stablecoins[0])?;
 
     let outcome = user
@@ -1248,7 +1255,11 @@ async fn test_full_purchase_flow() -> anyhow::Result<()> {
 
     if let Some(token) = nft_token {
         let token_owner = token["owner_id"].as_str().unwrap();
-        assert_eq!(token_owner, user.id().to_string(), "NFT should be transferred to buyer");
+        assert_eq!(
+            token_owner,
+            user.id().to_string(),
+            "NFT should be transferred to buyer"
+        );
     }
 
     println!("✅ Full purchase flow test passed");

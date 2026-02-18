@@ -2,8 +2,8 @@
 use near_sdk::json_types::U128;
 use near_sdk::{ext_contract, AccountId};
 
-use crate::TokenId;
 use crate::models::DisputeWinner;
+use crate::TokenId;
 
 // FT interface for cross-contract calls for near sdk
 #[allow(dead_code)]

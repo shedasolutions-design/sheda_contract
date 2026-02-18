@@ -1,17 +1,19 @@
+use crate::events::{
+    emit_event, AdminAddedEvent, AdminRemovedEvent, BidRefundedEvent, DisputeResolvedEvent,
+    EmergencyWithdrawalEvent, PropertyDeletedEvent, PropertyDelistedEvent,
+    StablecoinWithdrawnEvent,
+};
 pub use crate::ext::*;
 use crate::internal::extract_base_uri;
-#[allow(unused_imports)]
-use crate::{HasNew, models::*};
 use crate::views::LeaseView;
-use crate::events::{
-    emit_event, AdminAddedEvent, AdminRemovedEvent, BidRefundedEvent,
-    DisputeResolvedEvent, EmergencyWithdrawalEvent, PropertyDeletedEvent,
-    PropertyDelistedEvent, StablecoinWithdrawnEvent,
-};
 use crate::{models::ContractError, ShedaContract, ShedaContractExt};
+#[allow(unused_imports)]
+use crate::{models::*, HasNew};
 use near_contract_standards::non_fungible_token::metadata::NFTContractMetadata;
 use near_sdk::json_types::U128;
-use near_sdk::{env, log, near_bindgen, require, AccountId, Gas, NearToken, Promise, PromiseResult};
+use near_sdk::{
+    env, log, near_bindgen, require, AccountId, Gas, NearToken, Promise, PromiseResult,
+};
 
 fn checked_add_u128(left: u128, right: u128, label: &str) -> u128 {
     left.checked_add(right)
@@ -67,10 +69,7 @@ impl ShedaContract {
             env::signer_account_id()
         );
 
-        let current_balance = *self
-            .stable_coin_balances
-            .get(&escrow_token)
-            .unwrap_or(&0);
+        let current_balance = *self.stable_coin_balances.get(&escrow_token).unwrap_or(&0);
         self.stable_coin_balances.insert(
             escrow_token.clone(),
             checked_sub_u128(current_balance, payout, "resolve_dispute payout"),
@@ -153,10 +152,11 @@ impl ShedaContract {
             .cloned()
             .ok_or(ContractError::LeaseNotFound)?;
         let info = lease.dispute.ok_or(ContractError::DisputeAlreadyRaised)?;
-        let winner = info.oracle_result.ok_or(ContractError::DisputeAlreadyRaised)?;
+        let winner = info
+            .oracle_result
+            .ok_or(ContractError::DisputeAlreadyRaised)?;
         self.resolve_dispute_payout(lease_id, winner, payout_amount)
     }
-
 
     #[payable]
     pub fn get_leases_with_disputes(&mut self) -> Vec<LeaseView> {
@@ -288,8 +288,7 @@ impl ShedaContract {
         self.assert_owner();
         if !self.accepted_stablecoin.contains(&token_account) {
             self.accepted_stablecoin.push(token_account.clone());
-            self.stable_coin_balances
-                .insert(token_account.clone(), 0);
+            self.stable_coin_balances.insert(token_account.clone(), 0);
             log!(
                 "Stablecoin {} added by owner {}",
                 token_account,
@@ -318,9 +317,9 @@ impl ShedaContract {
                     .then(
                         Self::ext(env::current_account_id())
                             .with_static_gas(Gas::from_tgas(10))
-                            .withdraw_callback(token.clone(), U128(balance))
+                            .withdraw_callback(token.clone(), U128(balance)),
                     );
-                
+
                 log!(
                     "Emergency withdrawal of {} {} to {} by owner {}",
                     balance,
@@ -347,7 +346,11 @@ impl ShedaContract {
                 log!("Withdrawal of {} {} successful", amount.0, token);
             }
             PromiseResult::Failed => {
-                log!("Withdrawal of {} {} failed, reverting balance", amount.0, token);
+                log!(
+                    "Withdrawal of {} {} failed, reverting balance",
+                    amount.0,
+                    token
+                );
                 let current_balance = *self.stable_coin_balances.get(&token).unwrap_or(&0);
                 self.stable_coin_balances.insert(
                     token,
@@ -379,7 +382,7 @@ impl ShedaContract {
         self.assert_owner();
         let balance = *self.stable_coin_balances.get(&token_account).unwrap_or(&0);
         assert!(balance >= amount, "Insufficient balance for withdrawal");
-        
+
         // Optimistically update balance
         self.stable_coin_balances.insert(
             token_account.clone(),
@@ -395,7 +398,7 @@ impl ShedaContract {
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(Gas::from_tgas(10))
-                    .withdraw_callback(token_account.clone(), U128(amount))
+                    .withdraw_callback(token_account.clone(), U128(amount)),
             );
 
         log!(
@@ -447,7 +450,7 @@ impl ShedaContract {
                     .then(
                         Self::ext(env::current_account_id())
                             .with_static_gas(Gas::from_tgas(10))
-                            .withdraw_callback(stablecoin_token.clone(), U128(amount))
+                            .withdraw_callback(stablecoin_token.clone(), U128(amount)),
                     );
 
                 bid.status = BidStatus::Cancelled;
@@ -556,7 +559,7 @@ impl ShedaContract {
     }
 
     #[payable]
-    pub fn admin_change_nft_metadata(&mut self, image_url: String, name: String, symbol:String) {
+    pub fn admin_change_nft_metadata(&mut self, image_url: String, name: String, symbol: String) {
         self.assert_admin();
         let new_metadata = NFTContractMetadata {
             spec: "nft-1.0.0".to_string(),
@@ -568,10 +571,6 @@ impl ShedaContract {
             reference_hash: None,
         };
         self.metadata.set(&new_metadata);
-        log!(
-            "NFT metadata changed by admin {}",
-            env::signer_account_id()
-        );
+        log!("NFT metadata changed by admin {}", env::signer_account_id());
     }
-    
 }

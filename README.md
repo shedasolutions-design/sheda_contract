@@ -1,6 +1,13 @@
 # Sheda Contract
 
-Sheda Contract is a NEAR Protocol smart contract designed for a decentralized property marketplace. It enables users to mint properties as NFTs, list them for sale or lease, and transact using supported stablecoins. The contract implements the NEP-171 standard for Non-Fungible Tokens.
+Sheda Contract is a production-ready NEAR Protocol smart contract designed for a decentralized property marketplace. It enables users to mint properties as NFTs, list them for sale or lease, and transact using supported stablecoins. The contract implements NEP-171/177/178 standards for Non-Fungible Tokens with comprehensive security features.
+
+## 📚 Documentation
+
+- **[User Guide](README.md)** - This file: execution flow and method reference
+- **[Implementation Summary](IMPLEMENTATION_SUMMARY.md)** - Complete feature overview and technical specifications
+- **[Gas Optimization Guide](GAS_OPTIMIZATION.md)** - Gas profiling and performance optimization
+- **[Production Deployment Guide](PRODUCTION.md)** - Best practices for mainnet deployment
 
 ## Table of Contents
 

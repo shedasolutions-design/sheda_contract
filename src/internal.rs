@@ -1,13 +1,16 @@
 use near_contract_standards::non_fungible_token::core::NonFungibleTokenCore;
-use near_sdk::{assert_one_yocto, env, json_types::U128, log, require, AccountId, Gas, NearToken, Promise, PromiseResult};
+use near_sdk::{
+    assert_one_yocto, env, json_types::U128, log, require, AccountId, Gas, NearToken, Promise,
+    PromiseResult,
+};
 
 use crate::{
-    ext::ft_contract,
     events::{
         emit_event, BidApprovedEvent, BidCancelledEvent, BidRefundedEvent, BidRejectedEvent,
         DealFinalizedEvent, DisputeRaisedEvent, LeaseExpiredEvent, PropertyDeletedEvent,
         PropertyDelistedEvent,
     },
+    ext::ft_contract,
     models::{Action, Bid, BidStatus},
     ShedaContract,
 };
@@ -109,10 +112,13 @@ pub fn extract_base_uri(url: &str) -> String {
 pub fn assert_storage_deposit_for_bytes(estimated_bytes: u128) {
     let attached = env::attached_deposit();
     let required = near_sdk::env::storage_byte_cost().saturating_mul(estimated_bytes);
-    
+
     require!(
         attached >= required,
-        format!("Insufficient storage deposit. Required at least {}", required)
+        format!(
+            "Insufficient storage deposit. Required at least {}",
+            required
+        )
     );
 }
 
@@ -166,10 +172,7 @@ pub fn internal_accept_bid(contract: &mut ShedaContract, property_id: u64, bid_i
 
     let now = env::block_timestamp();
     let bid_snapshot = {
-        let bids = contract
-            .bids
-            .get(&property_id)
-            .expect("Bid does not exist");
+        let bids = contract.bids.get(&property_id).expect("Bid does not exist");
         get_bid_from_list(bids, bid_id)
     };
 
@@ -221,18 +224,16 @@ pub fn internal_accept_bid(contract: &mut ShedaContract, property_id: u64, bid_i
         .stable_coin_balances
         .get(&bid.stablecoin_token)
         .unwrap_or(&0);
-    contract
-        .stable_coin_balances
-        .insert(
-            bid.stablecoin_token.clone(),
-            checked_sub_u128(current_balance, bid.amount, "accept_bid balance"),
-        );
+    contract.stable_coin_balances.insert(
+        bid.stablecoin_token.clone(),
+        checked_sub_u128(current_balance, bid.amount, "accept_bid balance"),
+    );
 
     // Part 2: Callback to handle success/failure
     promise.then(
         crate::ShedaContract::ext(env::current_account_id())
             .with_static_gas(Gas::from_tgas(50))
-            .accept_bid_callback(property_id, bid_id)
+            .accept_bid_callback(property_id, bid_id),
     )
 }
 
@@ -251,10 +252,7 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
                 .clone();
 
             let bid = {
-                let bids = contract
-                    .bids
-                    .get(&property_id)
-                    .expect("Bid does not exist");
+                let bids = contract.bids.get(&property_id).expect("Bid does not exist");
                 get_bid_from_list(bids, bid_id)
             };
 
@@ -272,7 +270,8 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
                     if other_bid.id == bid_id {
                         other_bid.status = BidStatus::Completed;
                         other_bid.updated_at = env::block_timestamp();
-                        other_bid.escrow_release_tx = Some(format!("block:{}", env::block_height()));
+                        other_bid.escrow_release_tx =
+                            Some(format!("block:{}", env::block_height()));
                         continue;
                     }
 
@@ -354,11 +353,8 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
                     };
                     updated_property.active_lease = Some(lease.clone());
                     contract.leases.insert(lease.id, lease);
-                    contract.lease_counter = checked_add_u64(
-                        contract.lease_counter,
-                        1,
-                        "lease_counter",
-                    );
+                    contract.lease_counter =
+                        checked_add_u64(contract.lease_counter, 1, "lease_counter");
                     contract.properties.insert(property_id, updated_property);
 
                     emit_event(
@@ -368,9 +364,7 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
                             buyer_id: bid.bidder.clone(),
                             seller_id: property.owner_id.clone(),
                             amount: bid.amount,
-                            lease_duration_nanos: property
-                                .lease_duration_months
-                                .unwrap_or(0)
+                            lease_duration_nanos: property.lease_duration_months.unwrap_or(0)
                                 * 30
                                 * 24
                                 * 60
@@ -394,12 +388,10 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
                 .stable_coin_balances
                 .get(&bid.stablecoin_token)
                 .unwrap_or(&0);
-            contract
-                .stable_coin_balances
-                .insert(
-                    bid.stablecoin_token.clone(),
-                    checked_add_u128(current_balance, bid.amount, "accept_bid revert"),
-                );
+            contract.stable_coin_balances.insert(
+                bid.stablecoin_token.clone(),
+                checked_add_u128(current_balance, bid.amount, "accept_bid revert"),
+            );
 
             if let Some(bids) = contract.bids.get_mut(&property_id) {
                 let _ = update_bid_in_list(bids, bid_id, |bid| {
@@ -451,12 +443,10 @@ pub fn internal_reject_bid(contract: &mut ShedaContract, property_id: u64, bid_i
         .stable_coin_balances
         .get(&bid.stablecoin_token)
         .unwrap_or(&0);
-    contract
-        .stable_coin_balances
-        .insert(
-            bid.stablecoin_token.clone(),
-            checked_sub_u128(current_balance, bid.amount, "reject_bid refund"),
-        );
+    contract.stable_coin_balances.insert(
+        bid.stablecoin_token.clone(),
+        checked_sub_u128(current_balance, bid.amount, "reject_bid refund"),
+    );
 
     if let Some(bids) = contract.bids.get_mut(&property_id) {
         let _ = update_bid_in_list(bids, bid_id, |bid| {
@@ -501,16 +491,19 @@ pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_i
     );
 
     //ensure my bid was not accepted yet
-    let property = contract.properties.get(&property_id).expect("Property does not exist");
-    
+    let property = contract
+        .properties
+        .get(&property_id)
+        .expect("Property does not exist");
+
     if let Some(sold) = &property.sold {
         if sold.buyer_id == bid.bidder {
-             env::panic_str("Cannot cancel bid: property already sold to you");
+            env::panic_str("Cannot cancel bid: property already sold to you");
         }
     }
     if let Some(lease) = &property.active_lease {
         if lease.tenant_id == bid.bidder && lease.active {
-             env::panic_str("Cannot cancel bid: property already leased to you");
+            env::panic_str("Cannot cancel bid: property already leased to you");
         }
     }
 
@@ -526,12 +519,10 @@ pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_i
         .stable_coin_balances
         .get(&bid.stablecoin_token)
         .unwrap_or(&0);
-    contract
-        .stable_coin_balances
-        .insert(
-            bid.stablecoin_token.clone(),
-            checked_sub_u128(current_balance, bid.amount, "cancel_bid refund"),
-        );
+    contract.stable_coin_balances.insert(
+        bid.stablecoin_token.clone(),
+        checked_sub_u128(current_balance, bid.amount, "cancel_bid refund"),
+    );
 
     if let Some(bids) = contract.bids.get_mut(&property_id) {
         let _ = update_bid_in_list(bids, bid_id, |bid| {
@@ -572,10 +563,7 @@ pub fn internal_accept_bid_with_escrow(
 
     let now = env::block_timestamp();
     let bid_snapshot = {
-        let bids = contract
-            .bids
-            .get(&property_id)
-            .expect("Bid does not exist");
+        let bids = contract.bids.get(&property_id).expect("Bid does not exist");
         get_bid_from_list(bids, bid_id)
     };
 
@@ -623,8 +611,7 @@ pub fn internal_accept_bid_with_escrow(
                 continue;
             }
 
-            if env::used_gas().as_gas()
-                >= env::prepaid_gas().as_gas() - Gas::from_tgas(40).as_gas()
+            if env::used_gas().as_gas() >= env::prepaid_gas().as_gas() - Gas::from_tgas(40).as_gas()
             {
                 continue;
             }
@@ -702,13 +689,11 @@ pub fn internal_confirm_document_receipt(
             }
             bid.status = BidStatus::DocsConfirmed;
             bid.updated_at = env::block_timestamp();
-            bid.escrow_release_after = Some(
-                checked_add_u64(
-                    env::block_timestamp(),
-                    contract.escrow_release_delay_ns,
-                    "escrow timelock",
-                ),
-            );
+            bid.escrow_release_after = Some(checked_add_u64(
+                env::block_timestamp(),
+                contract.escrow_release_delay_ns,
+                "escrow timelock",
+            ));
         });
     } else {
         env::panic_str("Bid does not exist");
@@ -759,12 +744,10 @@ pub fn internal_release_escrow(
         .stable_coin_balances
         .get(&bid.stablecoin_token)
         .unwrap_or(&0);
-    contract
-        .stable_coin_balances
-        .insert(
-            bid.stablecoin_token.clone(),
-            checked_sub_u128(current_balance, bid.amount, "release_escrow"),
-        );
+    contract.stable_coin_balances.insert(
+        bid.stablecoin_token.clone(),
+        checked_sub_u128(current_balance, bid.amount, "release_escrow"),
+    );
 
     promise.then(
         crate::ShedaContract::ext(env::current_account_id())
@@ -849,11 +832,8 @@ pub fn release_escrow_callback(contract: &mut ShedaContract, property_id: u64, b
                     };
                     updated_property.active_lease = Some(lease.clone());
                     contract.leases.insert(lease.id, lease);
-                    contract.lease_counter = checked_add_u64(
-                        contract.lease_counter,
-                        1,
-                        "lease_counter",
-                    );
+                    contract.lease_counter =
+                        checked_add_u64(contract.lease_counter, 1, "lease_counter");
                     contract.properties.insert(property_id, updated_property);
                 }
             }
@@ -868,12 +848,10 @@ pub fn release_escrow_callback(contract: &mut ShedaContract, property_id: u64, b
                 .stable_coin_balances
                 .get(&bid.stablecoin_token)
                 .unwrap_or(&0);
-            contract
-                .stable_coin_balances
-                .insert(
-                    bid.stablecoin_token.clone(),
-                    checked_add_u128(current_balance, bid.amount, "release_escrow revert"),
-                );
+            contract.stable_coin_balances.insert(
+                bid.stablecoin_token.clone(),
+                checked_add_u128(current_balance, bid.amount, "release_escrow revert"),
+            );
 
             if let Some(bids) = contract.bids.get_mut(&property_id) {
                 let _ = update_bid_in_list(bids, bid_id, |bid| {
@@ -992,12 +970,10 @@ pub fn internal_refund_escrow_timeout(
         .stable_coin_balances
         .get(&bid.stablecoin_token)
         .unwrap_or(&0);
-    contract
-        .stable_coin_balances
-        .insert(
-            bid.stablecoin_token.clone(),
-            checked_sub_u128(current_balance, bid.amount, "refund_escrow_timeout"),
-        );
+    contract.stable_coin_balances.insert(
+        bid.stablecoin_token.clone(),
+        checked_sub_u128(current_balance, bid.amount, "refund_escrow_timeout"),
+    );
 
     promise.then(
         crate::ShedaContract::ext(env::current_account_id())
@@ -1045,12 +1021,10 @@ pub fn refund_escrow_timeout_callback(
                 .stable_coin_balances
                 .get(&stablecoin_token)
                 .unwrap_or(&0);
-            contract
-                .stable_coin_balances
-                .insert(
-                    stablecoin_token,
-                    checked_add_u128(current_balance, amount, "refund_escrow_timeout revert"),
-                );
+            contract.stable_coin_balances.insert(
+                stablecoin_token,
+                checked_add_u128(current_balance, amount, "refund_escrow_timeout revert"),
+            );
 
             env::panic_str("Timeout refund failed. Balance reverted.");
         }
@@ -1149,8 +1123,7 @@ pub fn internal_raise_dispute(contract: &mut ShedaContract, lease_id: u64, reaso
 
     let caller = env::predecessor_account_id();
     assert_eq!(
-        lease.tenant_id,
-        caller,
+        lease.tenant_id, caller,
         "Only the tenant can raise a dispute"
     );
 
@@ -1197,10 +1170,7 @@ pub fn internal_expire_lease(contract: &mut ShedaContract, lease_id: u64) {
     let current_time = env::block_timestamp();
 
     // Check if lease has expired
-    require!(
-        lease.end_time <= current_time,
-        "Lease has not expired yet"
-    );
+    require!(lease.end_time <= current_time, "Lease has not expired yet");
 
     require!(lease.active, "Lease is already inactive");
 
@@ -1215,7 +1185,7 @@ pub fn internal_expire_lease(contract: &mut ShedaContract, lease_id: u64) {
         .properties
         .get(&lease.property_id)
         .expect("Property not found");
-    
+
     contract.tokens.internal_transfer(
         &lease.tenant_id,
         &property.owner_id,

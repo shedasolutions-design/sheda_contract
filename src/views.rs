@@ -303,7 +303,12 @@ impl ShedaContract {
     }
 
     // Paginated view to get bids for a specific property
-    pub fn get_bids_for_property_paginated(&self, property_id: u64, from_index: u64, limit: u64) -> Vec<BidView> {
+    pub fn get_bids_for_property_paginated(
+        &self,
+        property_id: u64,
+        from_index: u64,
+        limit: u64,
+    ) -> Vec<BidView> {
         let limit = limit.min(MAX_PAGINATION_LIMIT);
         self.bids
             .get(&property_id)
@@ -319,7 +324,12 @@ impl ShedaContract {
 
     // Paginated view to get bids by a specific bidder
     #[payable]
-    pub fn get_bids_by_bidder(&mut self, bidder: AccountId, from_index: u64, limit: u64) -> Vec<BidView> {
+    pub fn get_bids_by_bidder(
+        &mut self,
+        bidder: AccountId,
+        from_index: u64,
+        limit: u64,
+    ) -> Vec<BidView> {
         let limit = limit.min(MAX_PAGINATION_LIMIT);
         self.bids
             .iter()
@@ -353,7 +363,12 @@ impl ShedaContract {
         bids
     }
 
-    pub fn view_bids_by_bidder(&self, bidder: AccountId, from_index: u64, limit: u64) -> Vec<BidView> {
+    pub fn view_bids_by_bidder(
+        &self,
+        bidder: AccountId,
+        from_index: u64,
+        limit: u64,
+    ) -> Vec<BidView> {
         self.bids
             .iter()
             .flat_map(|(_property_id, bids)| bids.iter())

@@ -1,6 +1,6 @@
 use near_sdk::json_types::{Base64VecU8, U128};
 use near_sdk::AccountId;
-use near_workspaces::{network::Sandbox, types::NearToken, Account, Contract, Worker};
+use near_workspaces::{network::Sandbox, types::{NearToken, Gas as NearGas}, Account, Contract, Worker};
 use serde_json::json;
 use std::str::FromStr;
 
@@ -413,7 +413,7 @@ async fn test_accept_bid_non_owner_fails() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_cannot_transfer_nft_during_active_lease() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, user) = init_contract(&worker).await?;
+    let (_contract, _owner, _user) = init_contract(&worker).await?;
 
     // This test would require creating an active lease first
     // Then attempting to transfer the NFT and expecting failure
@@ -582,7 +582,7 @@ async fn test_remove_admin() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_raise_dispute() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, _owner, _user) = init_contract(&worker).await?;
+    let (_contract, _owner, _user) = init_contract(&worker).await?;
 
     // This would require setting up a lease first
     // Then the tenant can raise a dispute
@@ -623,7 +623,7 @@ async fn test_emergency_withdraw_non_owner_fails() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_mint_property_with_zero_price() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (_contract, owner, _user) = init_contract(&worker).await?;
 
     let outcome = owner
         .call(contract.id(), "mint_property")
@@ -649,7 +649,7 @@ async fn test_mint_property_with_zero_price() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_reject_bid() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, _owner, _user) = init_contract(&worker).await?;
+    let (_contract, _owner, _user) = init_contract(&worker).await?;
 
     // Would need to create a bid first, then reject it
     println!("✅ Reject bid test placeholder passed");
@@ -864,9 +864,9 @@ async fn test_set_time_lock_config_owner_only() -> anyhow::Result<()> {
     let (contract, owner, user) = init_contract(&worker).await?;
 
     let new_config = (
-        3600_000_000_000u64,
-        7200_000_000_000u64,
-        14400_000_000_000u64,
+        3_600_000_000_000u64,
+        7_200_000_000_000u64,
+        14_400_000_000_000u64,
     );
 
     // Owner can set config
@@ -908,7 +908,7 @@ async fn test_upgrade_delay_enforcement() -> anyhow::Result<()> {
     let (contract, owner, _user) = init_contract(&worker).await?;
 
     // Set upgrade delay to 1 hour (in nanoseconds)
-    let one_hour_ns = 3600_000_000_000u64;
+    let one_hour_ns = 3_600_000_000_000u64;
     let outcome = owner
         .call(contract.id(), "set_upgrade_delay")
         .args_json(json!({ "delay_ns": one_hour_ns }))
@@ -934,7 +934,7 @@ async fn test_upgrade_delay_enforcement() -> anyhow::Result<()> {
     let outcome = owner
         .call(contract.id(), "apply_upgrade")
         .deposit(NearToken::from_yoctonear(1))
-        .gas(300_000_000_000_000)
+        .gas(NearGas::from_gas(300_000_000_000_000))
         .transact()
         .await?;
 
@@ -1132,7 +1132,7 @@ async fn test_full_lease_lifecycle_with_dispute() -> anyhow::Result<()> {
             "property_id": property_id
         }))
         .deposit(NearToken::from_yoctonear(1))
-        .gas(300_000_000_000_000)
+        .gas(NearGas::from_gas(300_000_000_000_000))
         .transact()
         .await?;
 
@@ -1240,7 +1240,7 @@ async fn test_full_purchase_flow() -> anyhow::Result<()> {
             "property_id": property_id
         }))
         .deposit(NearToken::from_yoctonear(1))
-        .gas(300_000_000_000_000)
+        .gas(NearGas::from_gas(300_000_000_000_000))
         .transact()
         .await?;
 

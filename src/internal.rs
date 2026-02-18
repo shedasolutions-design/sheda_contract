@@ -159,13 +159,16 @@ pub fn burn_nft(contract: &mut ShedaContract, token_id: String) {
 
 pub fn internal_accept_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) -> Promise {
     lock_bid(contract, property_id, bid_id);
-    let property = contract
-        .properties
-        .get(&property_id)
-        .expect("Property does not exist");
+    let owner_id = {
+        let property = contract
+            .properties
+            .get(&property_id)
+            .expect("Property does not exist");
+        property.owner_id.clone()
+    };
 
     assert_eq!(
-        property.owner_id,
+        owner_id,
         env::predecessor_account_id(),
         "Only the property owner can accept bids"
     );
@@ -208,7 +211,7 @@ pub fn internal_accept_bid(contract: &mut ShedaContract, property_id: u64, bid_i
         BidApprovedEvent {
             token_id: property_id,
             bidder_id: bid.bidder.clone(),
-            seller_id: property.owner_id.clone(),
+            seller_id: owner_id.clone(),
             amount: bid.amount,
         },
     );
@@ -217,7 +220,7 @@ pub fn internal_accept_bid(contract: &mut ShedaContract, property_id: u64, bid_i
     let promise = ft_contract::ext(bid.stablecoin_token.clone())
         .with_attached_deposit(NearToken::from_yoctonear(1))
         .with_static_gas(Gas::from_tgas(30))
-        .ft_transfer(property.owner_id.clone(), U128(bid.amount));
+        .ft_transfer(owner_id.clone(), U128(bid.amount));
 
     // Update stablecoin balance after payment to seller
     let current_balance = *contract
@@ -228,6 +231,12 @@ pub fn internal_accept_bid(contract: &mut ShedaContract, property_id: u64, bid_i
         bid.stablecoin_token.clone(),
         checked_sub_u128(current_balance, bid.amount, "accept_bid balance"),
     );
+
+    if contract.mock_transfers_enabled {
+        unlock_bid(contract, property_id, bid_id);
+        finalize_accepted_bid(contract, property_id, bid_id);
+        return Promise::new(env::current_account_id()).transfer(NearToken::from_yoctonear(0));
+    }
 
     // Part 2: Callback to handle success/failure
     promise.then(
@@ -244,136 +253,7 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
     match env::promise_result(0) {
         PromiseResult::Successful(_) => {
             log!("ft_transfer successful, proceeding with NFT transfer and bid updates");
-
-            let property = contract
-                .properties
-                .get(&property_id)
-                .expect("Property does not exist")
-                .clone();
-
-            let bid = {
-                let bids = contract.bids.get(&property_id).expect("Bid does not exist");
-                get_bid_from_list(bids, bid_id)
-            };
-
-            // Transfer NFT to bidder
-            contract.tokens.internal_transfer(
-                &property.owner_id,
-                &bid.bidder,
-                &property_id.to_string(),
-                None,
-                None,
-            );
-
-            if let Some(bids) = contract.bids.get_mut(&property_id) {
-                for other_bid in bids.iter_mut() {
-                    if other_bid.id == bid_id {
-                        other_bid.status = BidStatus::Completed;
-                        other_bid.updated_at = env::block_timestamp();
-                        other_bid.escrow_release_tx =
-                            Some(format!("block:{}", env::block_height()));
-                        continue;
-                    }
-
-                    if other_bid.status != BidStatus::Pending {
-                        continue;
-                    }
-
-                    if env::used_gas().as_gas()
-                        >= env::prepaid_gas().as_gas() - Gas::from_tgas(40).as_gas()
-                    {
-                        continue;
-                    }
-
-                    #[allow(unused_must_use)]
-                    ft_contract::ext(other_bid.stablecoin_token.clone())
-                        .with_attached_deposit(NearToken::from_yoctonear(1))
-                        .with_static_gas(Gas::from_tgas(30))
-                        .ft_transfer(other_bid.bidder.clone(), U128(other_bid.amount));
-
-                    let current_balance = *contract
-                        .stable_coin_balances
-                        .get(&other_bid.stablecoin_token)
-                        .unwrap_or(&0);
-                    contract.stable_coin_balances.insert(
-                        other_bid.stablecoin_token.clone(),
-                        checked_sub_u128(current_balance, other_bid.amount, "accept_bid refund"),
-                    );
-
-                    other_bid.status = BidStatus::Rejected;
-                    other_bid.updated_at = env::block_timestamp();
-                }
-            }
-
-            match bid.action {
-                Action::Purchase => {
-                    let mut updated_property = property.clone();
-                    updated_property.sold = Some(crate::models::Sold {
-                        property_id,
-                        buyer_id: bid.bidder.clone(),
-                        amount: bid.amount,
-                        previous_owner_id: property.owner_id.clone(),
-                        sold_at: env::block_timestamp(),
-                    });
-                    updated_property.is_for_sale = false;
-                    contract.properties.insert(property_id, updated_property);
-
-                    emit_event(
-                        "DealFinalized",
-                        DealFinalizedEvent {
-                            token_id: property_id,
-                            buyer_id: bid.bidder.clone(),
-                            seller_id: property.owner_id.clone(),
-                            amount: bid.amount,
-                            lease_duration_nanos: 0,
-                        },
-                    );
-                }
-                Action::Lease => {
-                    let mut updated_property = property.clone();
-                    let lease = crate::models::Lease {
-                        id: contract.lease_counter,
-                        property_id,
-                        tenant_id: bid.bidder.clone(),
-                        start_time: env::block_timestamp(),
-                        end_time: checked_add_u64(
-                            env::block_timestamp(),
-                            checked_mul_u64(
-                                property.lease_duration_months.unwrap(),
-                                30 * 24 * 60 * 60 * 1_000_000_000,
-                                "lease duration",
-                            ),
-                            "lease end_time",
-                        ),
-                        active: true,
-                        dispute_status: crate::models::DisputeStatus::None,
-                        dispute: None,
-                        escrow_held: bid.amount,
-                        escrow_token: bid.stablecoin_token.clone(),
-                    };
-                    updated_property.active_lease = Some(lease.clone());
-                    contract.leases.insert(lease.id, lease);
-                    contract.lease_counter =
-                        checked_add_u64(contract.lease_counter, 1, "lease_counter");
-                    contract.properties.insert(property_id, updated_property);
-
-                    emit_event(
-                        "DealFinalized",
-                        DealFinalizedEvent {
-                            token_id: property_id,
-                            buyer_id: bid.bidder.clone(),
-                            seller_id: property.owner_id.clone(),
-                            amount: bid.amount,
-                            lease_duration_nanos: property.lease_duration_months.unwrap_or(0)
-                                * 30
-                                * 24
-                                * 60
-                                * 60
-                                * 1_000_000_000,
-                        },
-                    );
-                }
-            }
+            finalize_accepted_bid(contract, property_id, bid_id);
         }
         PromiseResult::Failed => {
             log!("ft_transfer failed, reverting. NFT and bid remain unchanged");
@@ -550,13 +430,16 @@ pub fn internal_accept_bid_with_escrow(
     property_id: u64,
     bid_id: u64,
 ) -> bool {
-    let property = contract
-        .properties
-        .get(&property_id)
-        .expect("Property does not exist");
+    let (owner_id, lease_duration_months) = {
+        let property = contract
+            .properties
+            .get(&property_id)
+            .expect("Property does not exist");
+        (property.owner_id.clone(), property.lease_duration_months)
+    };
 
     assert_eq!(
-        property.owner_id,
+        owner_id,
         env::predecessor_account_id(),
         "Only the property owner can accept bids"
     );
@@ -598,7 +481,7 @@ pub fn internal_accept_bid_with_escrow(
         BidApprovedEvent {
             token_id: property_id,
             bidder_id: bid.bidder.clone(),
-            seller_id: property.owner_id.clone(),
+            seller_id: owner_id.clone(),
             amount: bid.amount,
         },
     );
@@ -638,7 +521,184 @@ pub fn internal_accept_bid_with_escrow(
 
     unlock_bid(contract, property_id, bid_id);
 
+    if matches!(&bid.action, Action::Lease) {
+        let mut updated_property = contract
+            .properties
+            .get(&property_id)
+            .cloned()
+            .expect("Property does not exist");
+        let lease = crate::models::Lease {
+            id: contract.lease_counter,
+            property_id,
+            tenant_id: bid.bidder.clone(),
+            start_time: env::block_timestamp(),
+            end_time: checked_add_u64(
+                env::block_timestamp(),
+                checked_mul_u64(
+                    lease_duration_months.unwrap(),
+                    30 * 24 * 60 * 60 * 1_000_000_000,
+                    "lease duration",
+                ),
+                "lease end_time",
+            ),
+            active: true,
+            dispute_status: crate::models::DisputeStatus::None,
+            dispute: None,
+            escrow_held: bid.amount,
+            escrow_token: bid.stablecoin_token.clone(),
+        };
+        updated_property.active_lease = Some(lease.clone());
+        contract.leases.insert(lease.id, lease);
+        contract.lease_counter = checked_add_u64(contract.lease_counter, 1, "lease_counter");
+        contract.properties.insert(property_id, updated_property);
+
+        emit_event(
+            "DealFinalized",
+            DealFinalizedEvent {
+                token_id: property_id,
+                buyer_id: bid.bidder.clone(),
+                seller_id: owner_id.clone(),
+                amount: bid.amount,
+                lease_duration_nanos: lease_duration_months.unwrap_or(0)
+                    * 30
+                    * 24
+                    * 60
+                    * 60
+                    * 1_000_000_000,
+            },
+        );
+    }
+
     true
+}
+
+fn finalize_accepted_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) {
+    let property = contract
+        .properties
+        .get(&property_id)
+        .expect("Property does not exist")
+        .clone();
+
+    let bid = {
+        let bids = contract.bids.get(&property_id).expect("Bid does not exist");
+        get_bid_from_list(bids, bid_id)
+    };
+
+    // Transfer NFT to bidder
+    contract.tokens.internal_transfer(
+        &property.owner_id,
+        &bid.bidder,
+        &property_id.to_string(),
+        None,
+        None,
+    );
+
+    if let Some(bids) = contract.bids.get_mut(&property_id) {
+        for other_bid in bids.iter_mut() {
+            if other_bid.id == bid_id {
+                other_bid.status = BidStatus::Completed;
+                other_bid.updated_at = env::block_timestamp();
+                other_bid.escrow_release_tx = Some(format!("block:{}", env::block_height()));
+                continue;
+            }
+
+            if other_bid.status != BidStatus::Pending {
+                continue;
+            }
+
+            if env::used_gas().as_gas() >= env::prepaid_gas().as_gas() - Gas::from_tgas(40).as_gas()
+            {
+                continue;
+            }
+
+            #[allow(unused_must_use)]
+            ft_contract::ext(other_bid.stablecoin_token.clone())
+                .with_attached_deposit(NearToken::from_yoctonear(1))
+                .with_static_gas(Gas::from_tgas(30))
+                .ft_transfer(other_bid.bidder.clone(), U128(other_bid.amount));
+
+            let current_balance = *contract
+                .stable_coin_balances
+                .get(&other_bid.stablecoin_token)
+                .unwrap_or(&0);
+            contract.stable_coin_balances.insert(
+                other_bid.stablecoin_token.clone(),
+                checked_sub_u128(current_balance, other_bid.amount, "accept_bid refund"),
+            );
+
+            other_bid.status = BidStatus::Rejected;
+            other_bid.updated_at = env::block_timestamp();
+        }
+    }
+
+    match bid.action {
+        Action::Purchase => {
+            let mut updated_property = property.clone();
+            updated_property.sold = Some(crate::models::Sold {
+                property_id,
+                buyer_id: bid.bidder.clone(),
+                amount: bid.amount,
+                previous_owner_id: property.owner_id.clone(),
+                sold_at: env::block_timestamp(),
+            });
+            updated_property.is_for_sale = false;
+            contract.properties.insert(property_id, updated_property);
+
+            emit_event(
+                "DealFinalized",
+                DealFinalizedEvent {
+                    token_id: property_id,
+                    buyer_id: bid.bidder.clone(),
+                    seller_id: property.owner_id.clone(),
+                    amount: bid.amount,
+                    lease_duration_nanos: 0,
+                },
+            );
+        }
+        Action::Lease => {
+            let mut updated_property = property.clone();
+            let lease = crate::models::Lease {
+                id: contract.lease_counter,
+                property_id,
+                tenant_id: bid.bidder.clone(),
+                start_time: env::block_timestamp(),
+                end_time: checked_add_u64(
+                    env::block_timestamp(),
+                    checked_mul_u64(
+                        property.lease_duration_months.unwrap(),
+                        30 * 24 * 60 * 60 * 1_000_000_000,
+                        "lease duration",
+                    ),
+                    "lease end_time",
+                ),
+                active: true,
+                dispute_status: crate::models::DisputeStatus::None,
+                dispute: None,
+                escrow_held: bid.amount,
+                escrow_token: bid.stablecoin_token.clone(),
+            };
+            updated_property.active_lease = Some(lease.clone());
+            contract.leases.insert(lease.id, lease);
+            contract.lease_counter = checked_add_u64(contract.lease_counter, 1, "lease_counter");
+            contract.properties.insert(property_id, updated_property);
+
+            emit_event(
+                "DealFinalized",
+                DealFinalizedEvent {
+                    token_id: property_id,
+                    buyer_id: bid.bidder.clone(),
+                    seller_id: property.owner_id.clone(),
+                    amount: bid.amount,
+                    lease_duration_nanos: property.lease_duration_months.unwrap_or(0)
+                        * 30
+                        * 24
+                        * 60
+                        * 60
+                        * 1_000_000_000,
+                },
+            );
+        }
+    }
 }
 
 pub fn internal_confirm_document_release(

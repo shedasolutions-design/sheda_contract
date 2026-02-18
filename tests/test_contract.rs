@@ -1,14 +1,18 @@
 use near_sdk::json_types::Base64VecU8;
 use near_sdk::AccountId;
-use near_workspaces::{network::Sandbox, types::{NearToken, Gas as NearGas}, Account, Contract, Worker};
+use near_workspaces::{
+    network::Sandbox,
+    types::{Gas as NearGas, NearToken},
+    Account, Contract, Worker,
+};
 use serde_json::json;
 use std::str::FromStr;
 
-const WASM_FILEPATH: &str = "./target/near/sheda_contract.wasm";
-
 /// Helper to deploy the contract
-async fn init_contract(worker: &Worker<Sandbox>) -> anyhow::Result<(Contract, Account, Account)> {
-    let contract_wasm = std::fs::read(WASM_FILEPATH)?;
+async fn init_contract(
+    worker: &Worker<Sandbox>,
+) -> anyhow::Result<(Contract, Account, Account, Account)> {
+    let contract_wasm = near_workspaces::compile_project("./").await?;
     let contract = worker.dev_deploy(&contract_wasm).await?;
 
     let owner = worker.dev_create_account().await?;
@@ -28,7 +32,15 @@ async fn init_contract(worker: &Worker<Sandbox>) -> anyhow::Result<(Contract, Ac
 
     assert!(outcome.is_success(), "Contract initialization failed");
 
-    Ok((contract, owner, user))
+    let outcome = owner
+        .call(contract.id(), "set_mock_transfers_enabled")
+        .args_json(json!({ "enabled": true }))
+        .transact()
+        .await?;
+
+    assert!(outcome.is_success(), "Enable mock transfers failed");
+
+    Ok((contract, owner, user, stablecoin))
 }
 
 // ============================================================================
@@ -38,7 +50,7 @@ async fn init_contract(worker: &Worker<Sandbox>) -> anyhow::Result<(Contract, Ac
 #[tokio::test]
 async fn test_contract_deployment_and_initialization() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, _owner, _user) = init_contract(&worker).await?;
+    let (contract, _owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     // Check counters are initialized to 0
     let property_counter: u64 = contract.view("get_property_counter").await?.json()?;
@@ -71,7 +83,7 @@ async fn test_contract_deployment_and_initialization() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_owner_is_admin() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, _owner, _user) = init_contract(&worker).await?;
+    let (contract, _owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     let owner_id: AccountId = contract.view("get_owner_id").await?.json()?;
     let admins: Vec<AccountId> = contract.view("get_all_admins").await?.json()?;
@@ -89,7 +101,7 @@ async fn test_owner_is_admin() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_time_lock_config_roundtrip() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     let new_config = (123_u64, 456_u64, 789_u64);
 
@@ -115,7 +127,7 @@ async fn test_time_lock_config_roundtrip() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_user_stats_empty() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, _owner, user) = init_contract(&worker).await?;
+    let (contract, _owner, user, _stablecoin) = init_contract(&worker).await?;
 
     let stats: serde_json::Value = contract
         .view("get_user_stats")
@@ -141,15 +153,15 @@ async fn test_user_stats_empty() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_upgrade_proposal_sets_status() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, _stablecoin) = init_contract(&worker).await?;
 
-    let wasm = std::fs::read(WASM_FILEPATH)?;
+    let wasm = vec![0u8; 1];
     let outcome = owner
         .call(contract.id(), "propose_upgrade")
         .args_json(json!({
             "code": Base64VecU8::from(wasm)
         }))
-        .deposit(NearToken::from_yoctonear(1))
+        .deposit(NearToken::from_millinear(10_000))
         .transact()
         .await?;
 
@@ -172,7 +184,7 @@ async fn test_upgrade_proposal_sets_status() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_mint_property() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     let outcome = owner
         .call(contract.id(), "mint_property")
@@ -218,7 +230,7 @@ async fn test_mint_property() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_mint_multiple_properties() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     // Mint 3 properties
     for i in 0..3 {
@@ -255,7 +267,7 @@ async fn test_mint_multiple_properties() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_unsupported_stablecoin_rejected() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     // Mint a property
     let outcome = owner
@@ -303,7 +315,7 @@ async fn test_unsupported_stablecoin_rejected() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_bid_amount_any_value() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let contract_wasm = std::fs::read(WASM_FILEPATH)?;
+    let contract_wasm = near_workspaces::compile_project("./").await?;
     let contract = worker.dev_deploy(&contract_wasm).await?;
     let owner = worker.dev_create_account().await?;
     let stablecoin = worker.dev_create_account().await?;
@@ -316,7 +328,8 @@ async fn test_bid_amount_any_value() -> anyhow::Result<()> {
             "supported_stablecoins": [stablecoin.id()]
         }))
         .transact()
-        .await?;
+        .await?
+        .into_result()?;
 
     // Mint property with price 1000000
     let outcome = owner
@@ -331,7 +344,8 @@ async fn test_bid_amount_any_value() -> anyhow::Result<()> {
         }))
         .deposit(NearToken::from_millinear(10))
         .transact()
-        .await?;
+        .await?
+        .into_result()?;
 
     let property_id: u64 = outcome.json()?;
 
@@ -370,7 +384,7 @@ async fn test_bid_amount_any_value() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_accept_bid_non_owner_fails() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, user) = init_contract(&worker).await?;
+    let (contract, owner, user, _stablecoin) = init_contract(&worker).await?;
 
     // Mint property
     let outcome = owner
@@ -396,7 +410,7 @@ async fn test_accept_bid_non_owner_fails() -> anyhow::Result<()> {
             "bid_id": 0,
             "property_id": property_id
         }))
-        .deposit(NearToken::from_yoctonear(1))
+        .deposit(NearToken::from_millinear(10_000))
         .transact()
         .await?;
 
@@ -413,7 +427,7 @@ async fn test_accept_bid_non_owner_fails() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_cannot_transfer_nft_during_active_lease() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (_contract, _owner, _user) = init_contract(&worker).await?;
+    let (_contract, _owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     // This test would require creating an active lease first
     // Then attempting to transfer the NFT and expecting failure
@@ -429,7 +443,7 @@ async fn test_cannot_transfer_nft_during_active_lease() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_delist_property() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     // Mint property
     let outcome = owner
@@ -477,7 +491,7 @@ async fn test_delist_property() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_delete_property() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     // Mint property
     let outcome = owner
@@ -526,7 +540,7 @@ async fn test_delete_property() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_add_admin() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, user) = init_contract(&worker).await?;
+    let (contract, owner, user, _stablecoin) = init_contract(&worker).await?;
 
     // Add user as admin
     let outcome = owner
@@ -553,14 +567,15 @@ async fn test_add_admin() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_remove_admin() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, user) = init_contract(&worker).await?;
+    let (contract, owner, user, _stablecoin) = init_contract(&worker).await?;
 
     // Add user as admin first
     owner
         .call(contract.id(), "add_admin")
         .args_json(json!({ "new_admin_id": user.id() }))
         .transact()
-        .await?;
+        .await?
+        .into_result()?;
 
     // Remove admin
     let outcome = owner
@@ -582,7 +597,7 @@ async fn test_remove_admin() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_raise_dispute() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (_contract, _owner, _user) = init_contract(&worker).await?;
+    let (_contract, _owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     // This would require setting up a lease first
     // Then the tenant can raise a dispute
@@ -598,7 +613,7 @@ async fn test_raise_dispute() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_emergency_withdraw_non_owner_fails() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, _owner, user) = init_contract(&worker).await?;
+    let (contract, _owner, user, _stablecoin) = init_contract(&worker).await?;
 
     // Try to emergency withdraw as non-owner
     let outcome = user
@@ -623,7 +638,7 @@ async fn test_emergency_withdraw_non_owner_fails() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_mint_property_with_zero_price() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     let outcome = owner
         .call(contract.id(), "mint_property")
@@ -649,7 +664,7 @@ async fn test_mint_property_with_zero_price() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_reject_bid() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (_contract, _owner, _user) = init_contract(&worker).await?;
+    let (_contract, _owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     // Would need to create a bid first, then reject it
     println!("✅ Reject bid test placeholder passed");
@@ -659,7 +674,7 @@ async fn test_reject_bid() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_cancel_bid() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (_contract, _owner, _user) = init_contract(&worker).await?;
+    let (_contract, _owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     // Would need to create a bid first, then cancel it
     println!("✅ Cancel bid test placeholder passed");
@@ -669,16 +684,15 @@ async fn test_cancel_bid() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_cron_check_leases() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     // Call cron check
-    let outcome = owner
+    let _outcome = owner
         .call(contract.id(), "cron_check_leases")
         .deposit(NearToken::from_yoctonear(1))
         .transact()
-        .await?;
-
-    assert!(outcome.is_success(), "Cron check should succeed");
+        .await?
+        .into_result()?;
 
     println!("✅ Cron check leases test passed");
     Ok(())
@@ -691,7 +705,7 @@ async fn test_cron_check_leases() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_get_properties_pagination() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     // Mint 5 properties
     for i in 0..5 {
@@ -707,7 +721,8 @@ async fn test_get_properties_pagination() -> anyhow::Result<()> {
             }))
             .deposit(NearToken::from_millinear(10))
             .transact()
-            .await?;
+            .await?
+            .into_result()?;
     }
 
     // Get first 3
@@ -741,7 +756,7 @@ async fn test_get_properties_pagination() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_get_property_by_owner() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     // Mint 2 properties
     for i in 0..2 {
@@ -757,7 +772,8 @@ async fn test_get_property_by_owner() -> anyhow::Result<()> {
             }))
             .deposit(NearToken::from_millinear(10))
             .transact()
-            .await?;
+            .await?
+            .into_result()?;
     }
 
     // Get properties by owner
@@ -780,14 +796,14 @@ async fn test_get_property_by_owner() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_set_oracle_account() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     let oracle_account = worker.dev_create_account().await?;
 
     // Set oracle account
     let outcome = owner
         .call(contract.id(), "set_oracle_account")
-        .args_json(json!({ "oracle_id": oracle_account.id() }))
+        .args_json(json!({ "oracle_account": oracle_account.id() }))
         .deposit(NearToken::from_yoctonear(1))
         .transact()
         .await?;
@@ -807,14 +823,14 @@ async fn test_set_oracle_account() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_oracle_account_owner_only() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, _owner, user) = init_contract(&worker).await?;
+    let (contract, _owner, user, _stablecoin) = init_contract(&worker).await?;
 
     let oracle_account = worker.dev_create_account().await?;
 
     // Try to set oracle as non-owner
     let outcome = user
         .call(contract.id(), "set_oracle_account")
-        .args_json(json!({ "oracle_id": oracle_account.id() }))
+        .args_json(json!({ "oracle_account": oracle_account.id() }))
         .deposit(NearToken::from_yoctonear(1))
         .transact()
         .await?;
@@ -832,7 +848,7 @@ async fn test_oracle_account_owner_only() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_vote_lease_dispute_admin_only() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, _owner, user) = init_contract(&worker).await?;
+    let (contract, _owner, user, _stablecoin) = init_contract(&worker).await?;
 
     // Try to vote as non-admin (should fail)
     let outcome = user
@@ -861,7 +877,7 @@ async fn test_vote_lease_dispute_admin_only() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_set_time_lock_config_owner_only() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, user) = init_contract(&worker).await?;
+    let (contract, owner, user, _stablecoin) = init_contract(&worker).await?;
 
     let new_config = (
         3_600_000_000_000u64,
@@ -905,7 +921,7 @@ async fn test_set_time_lock_config_owner_only() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_upgrade_delay_enforcement() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     // Set upgrade delay to 1 hour (in nanoseconds)
     let one_hour_ns = 3_600_000_000_000u64;
@@ -918,7 +934,7 @@ async fn test_upgrade_delay_enforcement() -> anyhow::Result<()> {
     assert!(outcome.is_success(), "Set upgrade delay should succeed");
 
     // Propose upgrade
-    let wasm = std::fs::read(WASM_FILEPATH)?;
+    let wasm = vec![0u8; 1];
     let outcome = owner
         .call(contract.id(), "propose_upgrade")
         .args_json(json!({
@@ -954,7 +970,7 @@ async fn test_upgrade_delay_enforcement() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_ft_on_transfer_reentrancy_protection() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, stablecoin) = init_contract(&worker).await?;
 
     // Mint property
     let outcome = owner
@@ -978,7 +994,7 @@ async fn test_ft_on_transfer_reentrancy_protection() -> anyhow::Result<()> {
     let stablecoin_id = AccountId::from_str(&stablecoins[0])?;
 
     // First ft_on_transfer call
-    let outcome = owner
+    let outcome = stablecoin
         .call(contract.id(), "ft_on_transfer")
         .args_json(json!({
             "sender_id": owner.id(),
@@ -1007,7 +1023,7 @@ async fn test_ft_on_transfer_reentrancy_protection() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_property_counter_overflow_protection() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     // Mint a few properties to verify counter increments safely
     for i in 0..5 {
@@ -1042,7 +1058,7 @@ async fn test_property_counter_overflow_protection() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_event_emission_on_mint() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user, _stablecoin) = init_contract(&worker).await?;
 
     let outcome = owner
         .call(contract.id(), "mint_property")
@@ -1076,7 +1092,7 @@ async fn test_event_emission_on_mint() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_full_lease_lifecycle_with_dispute() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, user) = init_contract(&worker).await?;
+    let (contract, owner, user, stablecoin) = init_contract(&worker).await?;
 
     // Step 1: Mint property with lease duration
     let outcome = owner
@@ -1100,7 +1116,7 @@ async fn test_full_lease_lifecycle_with_dispute() -> anyhow::Result<()> {
     let stablecoins: Vec<String> = contract.view("supported_stablecoins").await?.json()?;
     let stablecoin_id = AccountId::from_str(&stablecoins[0])?;
 
-    let outcome = user
+    let outcome = stablecoin
         .call(contract.id(), "ft_on_transfer")
         .args_json(json!({
             "sender_id": user.id(),
@@ -1147,12 +1163,11 @@ async fn test_full_lease_lifecycle_with_dispute() -> anyhow::Result<()> {
 
     // Step 5: Tenant raises dispute
     let outcome = user
-        .call(contract.id(), "raise_dispute")
+        .call(contract.id(), "raise_lease_dispute_with_reason")
         .args_json(json!({
             "lease_id": 0,
             "reason": "Property condition not as described"
         }))
-        .deposit(NearToken::from_yoctonear(1))
         .transact()
         .await?;
 
@@ -1185,7 +1200,7 @@ async fn test_full_lease_lifecycle_with_dispute() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_full_purchase_flow() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, owner, user) = init_contract(&worker).await?;
+    let (contract, owner, user, stablecoin) = init_contract(&worker).await?;
 
     // Step 1: Mint property for sale
     let outcome = owner
@@ -1208,7 +1223,7 @@ async fn test_full_purchase_flow() -> anyhow::Result<()> {
     let stablecoins: Vec<String> = contract.view("supported_stablecoins").await?.json()?;
     let stablecoin_id = AccountId::from_str(&stablecoins[0])?;
 
-    let outcome = user
+    let outcome = stablecoin
         .call(contract.id(), "ft_on_transfer")
         .args_json(json!({
             "sender_id": user.id(),

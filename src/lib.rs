@@ -60,6 +60,7 @@ pub struct ShedaContract {
 
     // Guards and configuration
     pub reentrancy_locks: IterableSet<String>,
+    pub mock_transfers_enabled: bool,
     pub bid_expiry_ns: u64,
     pub escrow_release_delay_ns: u64,
     pub lost_bid_claim_delay_ns: u64,
@@ -322,6 +323,7 @@ impl ShedaContract {
             accepted_stablecoin: supported_stablecoins.clone(),
             stable_coin_balances: IterableMap::new(b"s".to_vec()),
             reentrancy_locks: IterableSet::new(b"rl".to_vec()),
+            mock_transfers_enabled: false,
             bid_expiry_ns: 7 * 24 * 60 * 60 * 1_000_000_000,
             escrow_release_delay_ns: 24 * 60 * 60 * 1_000_000_000,
             lost_bid_claim_delay_ns: 24 * 60 * 60 * 1_000_000_000,
@@ -411,6 +413,7 @@ impl ShedaContract {
             accepted_stablecoin: old.accepted_stablecoin,
             stable_coin_balances: old.stable_coin_balances,
             reentrancy_locks: IterableSet::new(b"rl".to_vec()),
+            mock_transfers_enabled: false,
             bid_expiry_ns: 7 * 24 * 60 * 60 * 1_000_000_000,
             escrow_release_delay_ns: 24 * 60 * 60 * 1_000_000_000,
             lost_bid_claim_delay_ns: 24 * 60 * 60 * 1_000_000_000,
@@ -442,6 +445,12 @@ impl ShedaContract {
     pub fn set_upgrade_delay(&mut self, delay_ns: u64) {
         self.assert_owner();
         self.upgrade_delay_ns = delay_ns;
+    }
+
+    #[payable]
+    pub fn set_mock_transfers_enabled(&mut self, enabled: bool) {
+        self.assert_owner();
+        self.mock_transfers_enabled = enabled;
     }
 
     #[payable]

@@ -1,4 +1,4 @@
-use near_sdk::json_types::{Base64VecU8, U128};
+use near_sdk::json_types::Base64VecU8;
 use near_sdk::AccountId;
 use near_workspaces::{network::Sandbox, types::{NearToken, Gas as NearGas}, Account, Contract, Worker};
 use serde_json::json;
@@ -623,7 +623,7 @@ async fn test_emergency_withdraw_non_owner_fails() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_mint_property_with_zero_price() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (_contract, owner, _user) = init_contract(&worker).await?;
+    let (contract, owner, _user) = init_contract(&worker).await?;
 
     let outcome = owner
         .call(contract.id(), "mint_property")
@@ -659,7 +659,7 @@ async fn test_reject_bid() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_cancel_bid() -> anyhow::Result<()> {
     let worker = near_workspaces::sandbox().await?;
-    let (contract, _owner, _user) = init_contract(&worker).await?;
+    let (_contract, _owner, _user) = init_contract(&worker).await?;
 
     // Would need to create a bid first, then cancel it
     println!("✅ Cancel bid test placeholder passed");

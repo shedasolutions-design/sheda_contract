@@ -132,6 +132,13 @@ Owners can update time-based parameters (in nanoseconds) that control bid expiry
 - **Method**: `set_time_lock_config(bid_expiry_ns, escrow_release_delay_ns, lost_bid_claim_delay_ns)`
 - **View**: `get_time_lock_config()`
 
+### 8. Upgrade Governance
+Owners can stage upgrades with a configurable delay.
+- **Method**: `set_upgrade_delay(delay_ns)`
+- **Method**: `propose_upgrade(code)`
+- **Method**: `apply_upgrade()`
+- **View**: `get_upgrade_status()`
+
 ## Available Methods
 
 ### Initialization
@@ -166,6 +173,9 @@ Owners can update time-based parameters (in nanoseconds) that control bid expiry
 
 ### Configuration Actions
 -   `set_time_lock_config(bid_expiry_ns, escrow_release_delay_ns, lost_bid_claim_delay_ns)`: Update timelock settings (Owner only).
+-   `set_upgrade_delay(delay_ns)`: Set upgrade delay (Owner only).
+-   `propose_upgrade(code)`: Propose new code for upgrade (Owner only).
+-   `apply_upgrade()`: Apply a pending upgrade after delay (Owner only).
 
 ### Admin Actions
 -   `add_admin(new_admin_id)`: Add a new admin.
@@ -200,6 +210,7 @@ Owners can update time-based parameters (in nanoseconds) that control bid expiry
 -   `get_user_stats(account_id)`
 -   `get_property_instance(property_id)`
 -   `get_oracle_account()`
+-   `get_upgrade_status()`
 
 ## How to Build Locally?
 

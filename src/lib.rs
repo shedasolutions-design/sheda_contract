@@ -73,6 +73,11 @@ pub struct ShedaContract {
     pub oracle_account_id: Option<AccountId>,
     pub oracle_request_nonce: u64,
 
+    // Upgrade governance
+    pub upgrade_delay_ns: u64,
+    pub pending_upgrade_code: Option<Vec<u8>>,
+    pub pending_upgrade_at: Option<u64>,
+
     pub version: u32,
 }
 
@@ -322,6 +327,9 @@ impl ShedaContract {
             property_instances: IterableMap::new(b"pi".to_vec()),
             oracle_account_id: None,
             oracle_request_nonce: 0,
+            upgrade_delay_ns: 0,
+            pending_upgrade_code: None,
+            pending_upgrade_at: None,
             version: 2,
         };
         this.admins.insert(owner_id);
@@ -408,6 +416,9 @@ impl ShedaContract {
             property_instances: IterableMap::new(b"pi".to_vec()),
             oracle_account_id: None,
             oracle_request_nonce: 0,
+            upgrade_delay_ns: 0,
+            pending_upgrade_code: None,
+            pending_upgrade_at: None,
             version: 2,
         };
 
@@ -422,6 +433,45 @@ impl ShedaContract {
 
         Promise::new(env::current_account_id())
             .deploy_contract(code.0)
+            .then(Self::ext(env::current_account_id()).migrate())
+    }
+
+    #[payable]
+    pub fn set_upgrade_delay(&mut self, delay_ns: u64) {
+        self.assert_owner();
+        self.upgrade_delay_ns = delay_ns;
+    }
+
+    #[payable]
+    pub fn propose_upgrade(&mut self, code: Base64VecU8) {
+        self.assert_owner();
+        require!(
+            self.pending_upgrade_code.is_none(),
+            "Pending upgrade exists"
+        );
+        self.pending_upgrade_code = Some(code.0);
+        self.pending_upgrade_at = Some(env::block_timestamp());
+    }
+
+    #[payable]
+    pub fn apply_upgrade(&mut self) -> near_sdk::Promise {
+        self.assert_owner();
+        let proposed_at = self
+            .pending_upgrade_at
+            .expect("No pending upgrade");
+        require!(
+            env::block_timestamp() >= proposed_at + self.upgrade_delay_ns,
+            "Upgrade delay not reached"
+        );
+
+        let code = self
+            .pending_upgrade_code
+            .take()
+            .expect("No pending upgrade");
+        self.pending_upgrade_at = None;
+
+        Promise::new(env::current_account_id())
+            .deploy_contract(code)
             .then(Self::ext(env::current_account_id()).migrate())
     }
 

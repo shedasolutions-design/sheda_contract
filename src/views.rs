@@ -7,6 +7,7 @@ use schemars::JsonSchema;
 
 // Default pagination limit for view methods
 const DEFAULT_PAGINATION_LIMIT: u64 = 100;
+const MAX_PAGINATION_LIMIT: u64 = 200;
 
 #[derive(serde::Serialize, serde::Deserialize, JsonSchema)]
 pub struct DisputeStatusView {
@@ -217,6 +218,7 @@ impl ShedaContract {
 
     //paginate list of properties
     pub fn get_properties(&self, from_index: u64, limit: u64) -> Vec<PropertyView> {
+        let limit = limit.min(MAX_PAGINATION_LIMIT);
         let mut result = Vec::new();
         let mut count = 0;
 
@@ -263,6 +265,10 @@ impl ShedaContract {
         )
     }
 
+    pub fn get_upgrade_status(&self) -> (Option<u64>, u64) {
+        (self.pending_upgrade_at, self.upgrade_delay_ns)
+    }
+
     pub fn get_oracle_account(&self) -> Option<AccountId> {
         self.oracle_account_id.clone()
     }
@@ -286,6 +292,7 @@ impl ShedaContract {
 
     // Paginated view to get all bids
     pub fn get_all_bids(&self, from_index: u64, limit: u64) -> Vec<BidView> {
+        let limit = limit.min(MAX_PAGINATION_LIMIT);
         self.bids
             .iter()
             .flat_map(|(_property_id, bids)| bids.iter())
@@ -297,6 +304,7 @@ impl ShedaContract {
 
     // Paginated view to get bids for a specific property
     pub fn get_bids_for_property_paginated(&self, property_id: u64, from_index: u64, limit: u64) -> Vec<BidView> {
+        let limit = limit.min(MAX_PAGINATION_LIMIT);
         self.bids
             .get(&property_id)
             .map(|bids| {
@@ -312,6 +320,7 @@ impl ShedaContract {
     // Paginated view to get bids by a specific bidder
     #[payable]
     pub fn get_bids_by_bidder(&mut self, bidder: AccountId, from_index: u64, limit: u64) -> Vec<BidView> {
+        let limit = limit.min(MAX_PAGINATION_LIMIT);
         self.bids
             .iter()
             .flat_map(|(_property_id, bids)| bids.iter())

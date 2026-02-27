@@ -1758,6 +1758,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91f75ff8eee73815c247d0e17f3c0b705f0e993922a5548acd2ad377aeb67fca"
 dependencies = [
  "borsh",
+ "schemars 0.8.22",
  "serde",
 ]
 
@@ -1808,6 +1809,15 @@ dependencies = [
  "json_comments",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "near-contract-standards"
+version = "5.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d59d3d4fd5d6cb11907c69b57f1c15e30acd48d775be5b5c4ccc79ffd6a35ab5"
+dependencies = [
+ "near-sdk",
 ]
 
 [[package]]
@@ -2156,6 +2166,7 @@ dependencies = [
  "base64 0.22.1",
  "borsh",
  "bs58 0.5.1",
+ "near-abi",
  "near-account-id 2.5.0",
  "near-crypto 0.34.6",
  "near-gas",
@@ -2167,6 +2178,7 @@ dependencies = [
  "near-token",
  "near-vm-runner",
  "once_cell",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "serde_with",
@@ -2237,6 +2249,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34de6b54d82d0790b2a56b677e7b4ecb7f021a7e8559f8611065c890d56cfcda"
 dependencies = [
  "borsh",
+ "schemars 0.8.22",
  "serde",
 ]
 
@@ -2932,7 +2945,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
 dependencies = [
  "dyn-clone",
- "schemars_derive",
+ "schemars_derive 0.8.22",
  "serde",
  "serde_json",
 ]
@@ -2957,6 +2970,7 @@ checksum = "a2b42f36aa1cd011945615b92222f6bf73c599a102a300334cd7f8dbeec726cc"
 dependencies = [
  "dyn-clone",
  "ref-cast",
+ "schemars_derive 1.2.1",
  "serde",
  "serde_json",
 ]
@@ -2966,6 +2980,18 @@ name = "schemars_derive"
 version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32e265784ad618884abaea0600a9adf15393368d840e0222d101a072f3f7534d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d115b50f4aaeea07e79c1912f645c7513d81715d0420f8bc77a18c6260b307f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3120,6 +3146,7 @@ dependencies = [
  "hex",
  "indexmap 1.9.3",
  "indexmap 2.13.0",
+ "schemars 0.8.22",
  "schemars 0.9.0",
  "schemars 1.2.1",
  "serde_core",
@@ -3189,8 +3216,14 @@ dependencies = [
 name = "sheda_contract"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "borsh",
+ "near-abi",
+ "near-contract-standards",
  "near-sdk",
  "near-workspaces",
+ "schemars 1.2.1",
+ "serde",
  "serde_json",
  "tokio",
 ]

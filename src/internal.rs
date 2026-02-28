@@ -705,17 +705,71 @@ pub fn internal_confirm_document_release(
     contract: &mut ShedaContract,
     property_id: u64,
     bid_id: u64,
-    document_token_id: String,
+    document_image_uri: String,
+    document_description: String,
 ) -> bool {
-    let property = contract
-        .properties
-        .get(&property_id)
-        .expect("Property does not exist");
+    let property_owner_id = {
+        let property = contract
+            .properties
+            .get(&property_id)
+            .expect("Property does not exist");
+        property.owner_id.clone()
+    };
 
     assert_eq!(
-        property.owner_id,
+        property_owner_id,
         env::predecessor_account_id(),
         "Only the property owner can release documents"
+    );
+
+    let bid_snapshot = {
+        let bids = contract.bids.get(&property_id).expect("Bid does not exist");
+        get_bid_from_list(bids, bid_id)
+    };
+
+    if bid_snapshot.status != BidStatus::Accepted {
+        env::panic_str("Bid is not in an accepted state");
+    }
+
+    if bid_snapshot.document_token_id.is_some() {
+        env::panic_str("Document already minted for this bid");
+    }
+
+    let trimmed_uri = document_image_uri.trim();
+    if trimmed_uri.is_empty() {
+        env::panic_str("Document image URI is required");
+    }
+
+    let trimmed_description = document_description.trim();
+    if trimmed_description.is_empty() {
+        env::panic_str("Document description is required");
+    }
+
+    let document_token_id = format!("doc:{}:{}", property_id, bid_id);
+    let agreement_label = match bid_snapshot.action {
+        Action::Purchase => "Property Document",
+        Action::Lease => "Rent Agreement",
+    };
+
+    let token_metadata = near_contract_standards::non_fungible_token::metadata::TokenMetadata {
+        title: Some(format!("{} #{}", agreement_label, bid_id)),
+        description: Some(trimmed_description.to_string()),
+        media: Some(trimmed_uri.to_string()),
+        copies: Some(1),
+        ..Default::default()
+    };
+
+    contract.tokens.internal_mint(
+        document_token_id.clone(),
+        property_owner_id.clone(),
+        Some(token_metadata),
+    );
+    contract.tokens.internal_transfer(
+        &property_owner_id,
+        &bid_snapshot.bidder,
+        &document_token_id,
+        None,
+        None,
     );
 
     if let Some(bids) = contract.bids.get_mut(&property_id) {
@@ -725,7 +779,9 @@ pub fn internal_confirm_document_release(
             }
             bid.status = BidStatus::DocsReleased;
             bid.updated_at = env::block_timestamp();
-            bid.document_token_id = Some(document_token_id);
+            bid.document_token_id = Some(document_token_id.clone());
+            bid.document_image_uri = Some(trimmed_uri.to_string());
+            bid.document_description = Some(trimmed_description.to_string());
         });
     } else {
         env::panic_str("Bid does not exist");
@@ -743,6 +799,9 @@ pub fn internal_confirm_document_receipt(
         let _ = update_bid_in_list(bids, bid_id, |bid| {
             if bid.status != BidStatus::DocsReleased {
                 env::panic_str("Bid is not in a document released state");
+            }
+            if bid.document_token_id.is_none() {
+                env::panic_str("No document was minted for this bid");
             }
             if bid.bidder != env::predecessor_account_id() {
                 env::panic_str("Only the bidder can confirm receipt");

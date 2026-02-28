@@ -410,7 +410,13 @@
               }
             },
             {
-              "name": "document_token_id",
+              "name": "document_image_uri",
+              "type_schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "document_description",
               "type_schema": {
                 "type": "string"
               }
@@ -2523,6 +2529,18 @@
               "minimum": 0.0
             },
             "dispute_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "document_description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "document_image_uri": {
               "type": [
                 "string",
                 "null"

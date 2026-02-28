@@ -93,6 +93,8 @@ pub struct OldBid {
     pub document_token_id: Option<String>,
     pub escrow_release_tx: Option<String>,
     pub dispute_reason: Option<String>,
+    pub expires_at: Option<u64>,
+    pub escrow_release_after: Option<u64>,
     pub action: Action,
     pub stablecoin_token: AccountId,
 }
@@ -358,7 +360,7 @@ impl ShedaContract {
             upgrade_delay_ns: 0,
             pending_upgrade_code: None,
             pending_upgrade_at: None,
-            version: 2,
+            version: 3,
         };
         this.admins.insert(owner_id);
         for stablecoin in supported_stablecoins {
@@ -372,115 +374,88 @@ impl ShedaContract {
     #[init(ignore_state)]
     #[private]
     pub fn migrate() -> Self {
-        let old: OldShedaContract = env::state_read().expect("Old state does not exist");
-        let default_token = old
-            .accepted_stablecoin
-            .first()
-            .cloned()
-            .unwrap_or_else(|| old.owner_id.clone());
+        // Read old state as a temporary struct containing OldBid entries
+        #[derive(BorshDeserialize)]
+        struct OldStateV2 {
+            pub tokens: NonFungibleToken,
+            pub metadata: LazyOption<NFTContractMetadata>,
+            pub properties: IterableMap<u64, Property>,
+            pub bids: IterableMap<u64, Vec<OldBid>>,
+            pub leases: IterableMap<u64, Lease>,
+            pub property_counter: u64,
+            pub bid_counter: u64,
+            pub lease_counter: u64,
+            pub property_per_owner: IterableMap<AccountId, Vec<u64>>,
+            pub lease_per_tenant: IterableMap<AccountId, Vec<u64>>,
+            pub admins: IterableSet<AccountId>,
+            pub owner_id: AccountId,
+            pub accepted_stablecoin: Vec<AccountId>,
+            pub stable_coin_balances: IterableMap<AccountId, u128>,
+            pub reentrancy_locks: IterableSet<String>,
+            pub mock_transfers_enabled: bool,
+            pub bid_expiry_ns: u64,
+            pub escrow_release_delay_ns: u64,
+            pub lost_bid_claim_delay_ns: u64,
+            pub global_contract_code: Option<Vec<u8>>,
+            pub property_instances: IterableMap<u64, AccountId>,
+            pub oracle_account_id: Option<AccountId>,
+            pub oracle_request_nonce: u64,
+            pub upgrade_delay_ns: u64,
+            pub pending_upgrade_code: Option<Vec<u8>>,
+            pub pending_upgrade_at: Option<u64>,
+            pub version: u32,
+        }
 
-        let mut bids = IterableMap::new(b"b".to_vec());
+        let old: OldStateV2 = env::state_read().expect("Old state does not exist");
+
+        // Transform OldBid entries to new Bid with document fields
+        let mut migrated_bids = IterableMap::new(b"b".to_vec());
         for (property_id, old_bids) in old.bids.iter() {
-            let upgraded_bids: Vec<Bid> = old_bids
+            let new_bids: Vec<Bid> = old_bids
                 .iter()
-                .map(|bid| Bid {
-                    id: bid.id,
-                    bidder: bid.bidder.clone(),
-                    property_id: bid.property_id,
-                    amount: bid.amount,
-                    created_at: bid.created_at,
-                    updated_at: bid.updated_at,
-                    status: bid.status.clone(),
-                    document_token_id: bid.document_token_id.clone(),
-                    escrow_release_tx: bid.escrow_release_tx.clone(),
-                    dispute_reason: bid.dispute_reason.clone(),
-                    expires_at: None,
-                    escrow_release_after: None,
-                    action: bid.action.clone(),
-                    stablecoin_token: bid.stablecoin_token.clone(),
+                .map(|old_bid| Bid {
+                    id: old_bid.id,
+                    bidder: old_bid.bidder.clone(),
+                    property_id: old_bid.property_id,
+                    amount: old_bid.amount,
+                    created_at: old_bid.created_at,
+                    updated_at: old_bid.updated_at,
+                    status: old_bid.status.clone(),
+                    document_token_id: old_bid.document_token_id.clone(),
+                    document_image_uri: None,
+                    document_description: None,
+                    escrow_release_tx: old_bid.escrow_release_tx.clone(),
+                    dispute_reason: old_bid.dispute_reason.clone(),
+                    expires_at: old_bid.expires_at,
+                    escrow_release_after: old_bid.escrow_release_after,
+                    action: old_bid.action.clone(),
+                    stablecoin_token: old_bid.stablecoin_token.clone(),
                 })
                 .collect();
-            bids.insert(*property_id, upgraded_bids);
+            migrated_bids.insert(*property_id, new_bids);
         }
 
-        let mut properties = IterableMap::new(b"p".to_vec());
-
-        for (property_id,old_property) in old.properties.iter(){
-            properties.insert(
-                *property_id,
-                Property{
-                    id: old_property.id,
-                    owner_id:old_property.owner_id.clone(),
-                    description:old_property.description.clone(),
-                    metadata_uri:old_property.metadata_uri.clone(),
-                    is_for_sale:old_property.is_for_sale,
-                    price:old_property.price,
-                    lease_duration_months:old_property.lease_duration_months,
-                    damage_escrow:old_property.damage_escrow,
-                    active_lease:{
-                        match old_property.active_lease.clone(){
-                            Some(lease)=>{
-                                Some(Lease{
-                                    id: lease.id,
-                                    property_id: lease.property_id,
-                                    tenant_id: lease.tenant_id,
-                                    start_time: lease.start_time,
-                                    end_time: lease.end_time,
-                                    active: lease.active,
-                                    dispute_status: lease.dispute_status,
-                                    dispute: None,
-                                    escrow_held: lease.escrow_held,
-                                    escrow_token: default_token.clone(),
-                                })
-                            }
-                            None => None
-                        }
-                    },
-                    timestamp:old_property.timestamp,
-                    sold:{
-                        match old_property.sold.clone(){
-                            Some(sale)=>{
-                                Some(Sold{
-                                    property_id:sale.property_id,
-                                    buyer_id:sale.buyer_id,
-                                    amount:sale.amount,
-                                    previous_owner_id:sale.previous_owner_id,
-                                    sold_at:sale.timestamp
-                                })
-                            }
-                            None => None
-                        }
-                        
-                    }
-                }
-
-            );
+        let mut bid_expiry_ns = old.bid_expiry_ns;
+        if bid_expiry_ns == 0 {
+            bid_expiry_ns = 7 * 24 * 60 * 60 * 1_000_000_000;
         }
 
-        let mut leases = IterableMap::new(b"l".to_vec());
-        for (lease_id, old_lease) in old.leases.iter() {
-            leases.insert(
-                *lease_id,
-                Lease {
-                    id: old_lease.id,
-                    property_id: old_lease.property_id,
-                    tenant_id: old_lease.tenant_id.clone(),
-                    start_time: old_lease.start_time,
-                    end_time: old_lease.end_time,
-                    active: old_lease.active,
-                    dispute_status: old_lease.dispute_status.clone(),
-                    dispute: None,
-                    escrow_held: old_lease.escrow_held,
-                    escrow_token: default_token.clone(),
-                },
-            );
+        let mut escrow_release_delay_ns = old.escrow_release_delay_ns;
+        if escrow_release_delay_ns == 0 {
+            escrow_release_delay_ns = 24 * 60 * 60 * 1_000_000_000;
         }
-        let upgraded = Self {
+
+        let mut lost_bid_claim_delay_ns = old.lost_bid_claim_delay_ns;
+        if lost_bid_claim_delay_ns == 0 {
+            lost_bid_claim_delay_ns = 24 * 60 * 60 * 1_000_000_000;
+        }
+
+        Self {
             tokens: old.tokens,
             metadata: old.metadata,
-            properties: properties,
-            bids,
-            leases,
+            properties: old.properties,
+            bids: migrated_bids,
+            leases: old.leases,
             property_counter: old.property_counter,
             bid_counter: old.bid_counter,
             lease_counter: old.lease_counter,
@@ -490,22 +465,20 @@ impl ShedaContract {
             owner_id: old.owner_id,
             accepted_stablecoin: old.accepted_stablecoin,
             stable_coin_balances: old.stable_coin_balances,
-            reentrancy_locks: IterableSet::new(b"rl".to_vec()),
-            mock_transfers_enabled: false,
-            bid_expiry_ns: 7 * 24 * 60 * 60 * 1_000_000_000,
-            escrow_release_delay_ns: 24 * 60 * 60 * 1_000_000_000,
-            lost_bid_claim_delay_ns: 24 * 60 * 60 * 1_000_000_000,
-            global_contract_code: None,
-            property_instances: IterableMap::new(b"pi".to_vec()),
-            oracle_account_id: None,
-            oracle_request_nonce: 0,
-            upgrade_delay_ns: 0,
-            pending_upgrade_code: None,
-            pending_upgrade_at: None,
-            version: 2,
-        };
-
-        upgraded
+            reentrancy_locks: old.reentrancy_locks,
+            mock_transfers_enabled: old.mock_transfers_enabled,
+            bid_expiry_ns,
+            escrow_release_delay_ns,
+            lost_bid_claim_delay_ns,
+            global_contract_code: old.global_contract_code,
+            property_instances: old.property_instances,
+            oracle_account_id: old.oracle_account_id,
+            oracle_request_nonce: old.oracle_request_nonce,
+            upgrade_delay_ns: old.upgrade_delay_ns,
+            pending_upgrade_code: old.pending_upgrade_code,
+            pending_upgrade_at: old.pending_upgrade_at,
+            version: 3,
+        }
     }
 
     /// Owner-only contract upgrade entrypoint.
@@ -778,6 +751,8 @@ impl ShedaContract {
             updated_at: env::block_timestamp(),
             status: BidStatus::Pending,
             document_token_id: None,
+            document_image_uri: None,
+            document_description: None,
             escrow_release_tx: None,
             dispute_reason: None,
             expires_at,
@@ -874,9 +849,16 @@ impl ShedaContract {
         &mut self,
         bid_id: u64,
         property_id: u64,
-        document_token_id: String,
+        document_image_uri: String,
+        document_description: String,
     ) -> bool {
-        internal::internal_confirm_document_release(self, property_id, bid_id, document_token_id)
+        internal::internal_confirm_document_release(
+            self,
+            property_id,
+            bid_id,
+            document_image_uri,
+            document_description,
+        )
     }
 
     pub fn confirm_document_receipt(&mut self, bid_id: u64, property_id: u64) -> bool {

@@ -134,14 +134,4 @@ The contract emits JSON-serializable events (src/events.rs) such as BidPlaced, B
 - Inspect `INTEGRATION_GUIDE.md` and `sheda_contract_abi.json` to wire frontends/agents.
 
 ## Contribution & license
-- This repository currently does not include an explicit LICENSE file. Add a LICENSE (MIT / Apache-2.0) to make reuse and contribution terms clear.
-- If you want, I can add a recommended LICENSE and a CONTRIBUTING.md template.
-
----
-
-If you'd like, I can now:
-- Replace README.md with this expanded version (I will commit it),
-- Add an API section that auto-generates example JSON for each public method (scan src/ and produce exact parameter shapes), or
-- Create example near-cli / near-api-js scripts for common flows (mint + place bid + accept) so the front-end team can test quickly.
-
-Which of those should I do next?
+-

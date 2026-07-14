@@ -1,43 +1,64 @@
 # sheda_contract
 
-cargo-near-new-project-description
+A NEAR smart contract for a real estate platform implemented in Rust.
 
-## How to Build Locally?
+This repository contains the contract source, build settings for reproducible WASM, and tests.
 
-Install [`cargo-near`](https://github.com/near/cargo-near) and run:
+## Quickstart
+
+Prerequisites
+
+- Rust (recommended via rustup)
+- wasm32 target: `rustup target add wasm32-unknown-unknown`
+- cargo-near: `cargo install cargo-near`
+- NEAR CLI (optional, for interacting with chains): see https://near.cli.rs
+
+Build (local)
 
 ```bash
 cargo near build
 ```
 
-## How to Test Locally?
+Run tests
 
 ```bash
 cargo test
 ```
 
-## How to Deploy?
+Deploy
 
-Deployment is automated with GitHub Actions CI/CD pipeline.
-To deploy manually, install [`cargo-near`](https://github.com/near/cargo-near) and run:
+Deployment is automated via the repository's GitHub Actions CI/CD pipeline. To deploy manually, install `cargo-near` and then:
 
-If you deploy for debugging purposes:
+- For debugging/non-reproducible builds:
+
 ```bash
 cargo near deploy build-non-reproducible-wasm <account-id>
 ```
 
-If you deploy production ready smart contract:
+- For production/reproducible builds:
+
 ```bash
 cargo near deploy build-reproducible-wasm <account-id>
 ```
 
-## Useful Links
+Replace `<account-id>` with your NEAR account name.
 
-- [cargo-near](https://github.com/near/cargo-near) - NEAR smart contract development toolkit for Rust
-- [near CLI](https://near.cli.rs) - Interact with NEAR blockchain from command line
+Notes
+
+- The Cargo.toml is configured for reproducible builds using the `sourcescan/cargo-near` Docker image; see the `package.metadata.near.reproducible_build` section for details.
+- NEP-0330 metadata is available for contracts built with `cargo-near`.
+
+Useful links
+
+- [cargo-near](https://github.com/near/cargo-near) - NEAR smart contract toolkit for Rust
 - [NEAR Rust SDK Documentation](https://docs.near.org/sdk/rust/introduction)
 - [NEAR Documentation](https://docs.near.org)
-- [NEAR StackOverflow](https://stackoverflow.com/questions/tagged/nearprotocol)
-- [NEAR Discord](https://near.chat)
-- [NEAR Telegram Developers Community Group](https://t.me/neardev)
-- NEAR DevHub: [Telegram](https://t.me/neardevhub), [Twitter](https://twitter.com/neardevhub)
+- [near CLI](https://near.cli.rs)
+
+License
+
+This repository does not specify a license in the project files. If you intend to publish or share this project, add a LICENSE file to clarify usage permissions.
+
+Repository
+
+https://github.com/shedasolutions-design/sheda_contract

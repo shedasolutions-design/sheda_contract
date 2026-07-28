@@ -280,12 +280,60 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
                 });
             }
 
-            env::panic_str("Payment transfer failed. Bid acceptance aborted.");
+            // NOTE: do not panic here. A panicking receipt discards every state
+            // write it made in this same call, including the revert above, which
+            // would otherwise leave the balance permanently short and the bid
+            // stuck in `Accepted` with no way to retry/cancel/reject it.
+            log!("Payment transfer failed. Bid acceptance aborted; balance and status reverted to Pending.");
         }
     }
 }
 
-pub fn internal_reject_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) {
+// Shared callback for the refund transfers fired from internal_reject_bid,
+// internal_cancel_bid, and the "refund other pending bidders" loops in
+// internal_accept_bid_with_escrow / finalize_accepted_bid. Those call sites
+// optimistically decrement the ledger and flip the bid to a terminal status
+// before the transfer confirms; if the transfer actually fails (e.g. the
+// bidder's account isn't storage-registered on the token contract), this
+// callback puts both back so the refund can be retried instead of the funds
+// silently vanishing from the contract's own accounting.
+pub fn refund_pending_bid_callback(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+    stablecoin_token: AccountId,
+    amount: u128,
+) {
+    match env::promise_result(0) {
+        PromiseResult::Successful(_) => {
+            log!("Refund transfer for bid {} succeeded", bid_id);
+        }
+        PromiseResult::Failed => {
+            let current_balance = *contract
+                .stable_coin_balances
+                .get(&stablecoin_token)
+                .unwrap_or(&0);
+            contract.stable_coin_balances.insert(
+                stablecoin_token,
+                checked_add_u128(current_balance, amount, "refund_pending_bid revert"),
+            );
+
+            if let Some(bids) = contract.bids.get_mut(&property_id) {
+                let _ = update_bid_in_list(bids, bid_id, |bid| {
+                    bid.status = BidStatus::Pending;
+                    bid.updated_at = env::block_timestamp();
+                });
+            }
+
+            log!(
+                "Refund transfer for bid {} failed; balance and status reverted to Pending",
+                bid_id
+            );
+        }
+    }
+}
+
+pub fn internal_reject_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) -> Promise {
     let bid = {
         let bids: &Vec<Bid> = contract.bids.get(&property_id).expect("Bid does not exist");
         get_bid_from_list(bids, bid_id)
@@ -312,13 +360,12 @@ pub fn internal_reject_bid(contract: &mut ShedaContract, property_id: u64, bid_i
     );
 
     // Refund stablecoin to bidder
-    #[allow(unused_must_use)]
-    ft_contract::ext(bid.stablecoin_token.clone())
+    let refund_promise = ft_contract::ext(bid.stablecoin_token.clone())
         .with_attached_deposit(NearToken::from_yoctonear(1))
         .with_static_gas(Gas::from_tgas(30))
         .ft_transfer(bid.bidder.clone(), U128(bid.amount));
 
-    // Update stablecoin balance after refund
+    // Update stablecoin balance after refund (reverted on transfer failure)
     let current_balance = *contract
         .stable_coin_balances
         .get(&bid.stablecoin_token)
@@ -343,13 +390,24 @@ pub fn internal_reject_bid(contract: &mut ShedaContract, property_id: u64, bid_i
         BidRejectedEvent {
             token_id: property_id,
             bid_id,
-            bidder_id: bid.bidder,
+            bidder_id: bid.bidder.clone(),
             amount: bid.amount,
         },
     );
+
+    refund_promise.then(
+        crate::ShedaContract::ext(env::current_account_id())
+            .with_static_gas(Gas::from_tgas(20))
+            .refund_pending_bid_callback(
+                property_id,
+                bid_id,
+                bid.stablecoin_token.clone(),
+                bid.amount,
+            ),
+    )
 }
 
-pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) {
+pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) -> Promise {
     let bid = {
         let bids: &Vec<Bid> = contract.bids.get(&property_id).expect("Bid does not exist");
         get_bid_from_list(bids, bid_id)
@@ -388,13 +446,12 @@ pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_i
     }
 
     // Refund stablecoin to bidder
-    #[allow(unused_must_use)]
-    ft_contract::ext(bid.stablecoin_token.clone())
+    let refund_promise = ft_contract::ext(bid.stablecoin_token.clone())
         .with_attached_deposit(NearToken::from_yoctonear(1))
         .with_static_gas(Gas::from_tgas(30))
         .ft_transfer(bid.bidder.clone(), U128(bid.amount));
 
-    // Update stablecoin balance after refund
+    // Update stablecoin balance after refund (reverted on transfer failure)
     let current_balance = *contract
         .stable_coin_balances
         .get(&bid.stablecoin_token)
@@ -419,10 +476,21 @@ pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_i
         BidCancelledEvent {
             token_id: property_id,
             bid_id,
-            bidder_id: bid.bidder,
+            bidder_id: bid.bidder.clone(),
             amount: bid.amount,
         },
     );
+
+    refund_promise.then(
+        crate::ShedaContract::ext(env::current_account_id())
+            .with_static_gas(Gas::from_tgas(20))
+            .refund_pending_bid_callback(
+                property_id,
+                bid_id,
+                bid.stablecoin_token.clone(),
+                bid.amount,
+            ),
+    )
 }
 
 pub fn internal_accept_bid_with_escrow(
@@ -499,23 +567,37 @@ pub fn internal_accept_bid_with_escrow(
                 continue;
             }
 
-            #[allow(unused_must_use)]
-            ft_contract::ext(other_bid.stablecoin_token.clone())
+            let other_bid_id = other_bid.id;
+            let other_token = other_bid.stablecoin_token.clone();
+            let other_amount = other_bid.amount;
+
+            let other_refund_promise = ft_contract::ext(other_token.clone())
                 .with_attached_deposit(NearToken::from_yoctonear(1))
                 .with_static_gas(Gas::from_tgas(30))
-                .ft_transfer(other_bid.bidder.clone(), U128(other_bid.amount));
+                .ft_transfer(other_bid.bidder.clone(), U128(other_amount));
 
             let current_balance = *contract
                 .stable_coin_balances
-                .get(&other_bid.stablecoin_token)
+                .get(&other_token)
                 .unwrap_or(&0);
             contract.stable_coin_balances.insert(
-                other_bid.stablecoin_token.clone(),
-                checked_sub_u128(current_balance, other_bid.amount, "accept_bid_with_escrow"),
+                other_token.clone(),
+                checked_sub_u128(current_balance, other_amount, "accept_bid_with_escrow"),
             );
 
             other_bid.status = BidStatus::Rejected;
             other_bid.updated_at = env::block_timestamp();
+
+            other_refund_promise.then(
+                crate::ShedaContract::ext(env::current_account_id())
+                    .with_static_gas(Gas::from_tgas(20))
+                    .refund_pending_bid_callback(
+                        property_id,
+                        other_bid_id,
+                        other_token,
+                        other_amount,
+                    ),
+            );
         }
     }
 
@@ -547,10 +629,21 @@ pub fn internal_accept_bid_with_escrow(
             escrow_held: bid.amount,
             escrow_token: bid.stablecoin_token.clone(),
         };
+        let lease_id = lease.id;
         updated_property.active_lease = Some(lease.clone());
         contract.leases.insert(lease.id, lease);
         contract.lease_counter = checked_add_u64(contract.lease_counter, 1, "lease_counter");
         contract.properties.insert(property_id, updated_property);
+
+        let mut tenant_leases = contract
+            .lease_per_tenant
+            .get(&bid.bidder)
+            .cloned()
+            .unwrap_or_default();
+        tenant_leases.push(lease_id);
+        contract
+            .lease_per_tenant
+            .insert(bid.bidder.clone(), tenant_leases);
 
         emit_event(
             "DealFinalized",
@@ -611,23 +704,37 @@ fn finalize_accepted_bid(contract: &mut ShedaContract, property_id: u64, bid_id:
                 continue;
             }
 
-            #[allow(unused_must_use)]
-            ft_contract::ext(other_bid.stablecoin_token.clone())
+            let other_bid_id = other_bid.id;
+            let other_token = other_bid.stablecoin_token.clone();
+            let other_amount = other_bid.amount;
+
+            let other_refund_promise = ft_contract::ext(other_token.clone())
                 .with_attached_deposit(NearToken::from_yoctonear(1))
                 .with_static_gas(Gas::from_tgas(30))
-                .ft_transfer(other_bid.bidder.clone(), U128(other_bid.amount));
+                .ft_transfer(other_bid.bidder.clone(), U128(other_amount));
 
             let current_balance = *contract
                 .stable_coin_balances
-                .get(&other_bid.stablecoin_token)
+                .get(&other_token)
                 .unwrap_or(&0);
             contract.stable_coin_balances.insert(
-                other_bid.stablecoin_token.clone(),
-                checked_sub_u128(current_balance, other_bid.amount, "accept_bid refund"),
+                other_token.clone(),
+                checked_sub_u128(current_balance, other_amount, "accept_bid refund"),
             );
 
             other_bid.status = BidStatus::Rejected;
             other_bid.updated_at = env::block_timestamp();
+
+            other_refund_promise.then(
+                crate::ShedaContract::ext(env::current_account_id())
+                    .with_static_gas(Gas::from_tgas(20))
+                    .refund_pending_bid_callback(
+                        property_id,
+                        other_bid_id,
+                        other_token,
+                        other_amount,
+                    ),
+            );
         }
     }
 
@@ -677,10 +784,21 @@ fn finalize_accepted_bid(contract: &mut ShedaContract, property_id: u64, bid_id:
                 escrow_held: bid.amount,
                 escrow_token: bid.stablecoin_token.clone(),
             };
+            let lease_id = lease.id;
             updated_property.active_lease = Some(lease.clone());
             contract.leases.insert(lease.id, lease);
             contract.lease_counter = checked_add_u64(contract.lease_counter, 1, "lease_counter");
             contract.properties.insert(property_id, updated_property);
+
+            let mut tenant_leases = contract
+                .lease_per_tenant
+                .get(&bid.bidder)
+                .cloned()
+                .unwrap_or_default();
+            tenant_leases.push(lease_id);
+            contract
+                .lease_per_tenant
+                .insert(bid.bidder.clone(), tenant_leases);
 
             emit_event(
                 "DealFinalized",
@@ -920,6 +1038,13 @@ pub fn release_escrow_callback(contract: &mut ShedaContract, property_id: u64, b
                     contract.properties.insert(property_id, updated_property);
                 }
                 Action::Lease => {
+                    // The Lease record was already created in
+                    // internal_accept_bid_with_escrow when the bid was accepted
+                    // (escrow_held there tracks the funds we just released).
+                    // Creating a second Lease here would orphan that first
+                    // record (it stays active/untracked in `leases`) and would
+                    // never be indexed in `lease_per_tenant`, so all we do at
+                    // this stage is hand over the NFT.
                     contract.tokens.internal_transfer(
                         &property.owner_id,
                         &bid.bidder,
@@ -927,33 +1052,6 @@ pub fn release_escrow_callback(contract: &mut ShedaContract, property_id: u64, b
                         None,
                         None,
                     );
-
-                    let mut updated_property = property.clone();
-                    let lease = crate::models::Lease {
-                        id: contract.lease_counter,
-                        property_id,
-                        tenant_id: bid.bidder.clone(),
-                        start_time: env::block_timestamp(),
-                        end_time: checked_add_u64(
-                            env::block_timestamp(),
-                            checked_mul_u64(
-                                property.lease_duration_months.unwrap(),
-                                30 * 24 * 60 * 60 * 1_000_000_000,
-                                "lease duration",
-                            ),
-                            "lease end_time",
-                        ),
-                        active: true,
-                        dispute_status: crate::models::DisputeStatus::None,
-                        dispute: None,
-                        escrow_held: bid.amount,
-                        escrow_token: bid.stablecoin_token.clone(),
-                    };
-                    updated_property.active_lease = Some(lease.clone());
-                    contract.leases.insert(lease.id, lease);
-                    contract.lease_counter =
-                        checked_add_u64(contract.lease_counter, 1, "lease_counter");
-                    contract.properties.insert(property_id, updated_property);
                 }
             }
         }
@@ -979,7 +1077,10 @@ pub fn release_escrow_callback(contract: &mut ShedaContract, property_id: u64, b
                 });
             }
 
-            env::panic_str("Escrow release failed. Payment transfer aborted.");
+            // NOTE: do not panic here, it would discard the revert writes above
+            // (a panicking receipt rolls back every state change it made) and
+            // leave the balance short with the bid stuck past DocsConfirmed.
+            log!("Escrow release failed. Payment transfer aborted; balance and status reverted to DocsConfirmed.");
         }
     }
 }
@@ -1145,7 +1246,9 @@ pub fn refund_escrow_timeout_callback(
                 checked_add_u128(current_balance, amount, "refund_escrow_timeout revert"),
             );
 
-            env::panic_str("Timeout refund failed. Balance reverted.");
+            // NOTE: no panic here — see accept_bid_callback/release_escrow_callback
+            // for why a trailing panic would discard this very revert write.
+            log!("Timeout refund failed. Balance reverted.");
         }
     }
 }
@@ -1194,7 +1297,7 @@ pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) 
 
     assert_eq!(
         property.owner_id,
-        env::signer_account_id(),
+        env::predecessor_account_id(),
         "Only the property owner can delete the property"
     );
 
@@ -1228,7 +1331,7 @@ pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) 
         "PropertyDeleted",
         PropertyDeletedEvent {
             token_id: property_id,
-            actor_id: env::signer_account_id(),
+            actor_id: env::predecessor_account_id(),
         },
     );
 }

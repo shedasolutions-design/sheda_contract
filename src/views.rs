@@ -327,9 +327,14 @@ impl ShedaContract {
     }
 
     // Paginated view to get bids by a specific bidder
-    #[payable]
+    //
+    // This must stay a `&self` method with no #[payable]/#[private] attributes:
+    // near-sdk's codegen appends an `env::state_write` for any `&mut self`
+    // method, and `storage_write` is a prohibited host function during a
+    // view-only call, so a `&mut self` signature here throws `ProhibitedInView`
+    // for every caller trying to use this as a free, unsigned query.
     pub fn get_bids_by_bidder(
-        &mut self,
+        &self,
         bidder: AccountId,
         from_index: u64,
         limit: u64,

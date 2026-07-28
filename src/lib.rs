@@ -807,14 +807,25 @@ impl ShedaContract {
         internal::accept_bid_callback(self, property_id, bid_id);
     }
 
-    #[payable]
-    pub fn reject_bid(&mut self, bid_id: u64, property_id: u64) {
-        internal_reject_bid(self, property_id, bid_id);
+    #[private]
+    pub fn refund_pending_bid_callback(
+        &mut self,
+        property_id: u64,
+        bid_id: u64,
+        stablecoin_token: AccountId,
+        amount: u128,
+    ) {
+        internal::refund_pending_bid_callback(self, property_id, bid_id, stablecoin_token, amount);
     }
 
     #[payable]
-    pub fn cancel_bid(&mut self, bid_id: u64, property_id: u64) {
-        internal_cancel_bid(self, property_id, bid_id);
+    pub fn reject_bid(&mut self, bid_id: u64, property_id: u64) -> near_sdk::Promise {
+        internal_reject_bid(self, property_id, bid_id)
+    }
+
+    #[payable]
+    pub fn cancel_bid(&mut self, bid_id: u64, property_id: u64) -> near_sdk::Promise {
+        internal_cancel_bid(self, property_id, bid_id)
     }
 
     #[payable]

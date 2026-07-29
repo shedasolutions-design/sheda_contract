@@ -486,19 +486,22 @@ impl ShedaContract {
             .get(&property_id)
             .expect("Property not found")
             .clone();
-        assert!(!property.is_for_sale, "Property is currently for sale");
+        assert!(property.is_for_sale, "Property is not currently for sale");
         assert!(
             property.active_lease.is_none(),
             "Property is currently leased"
         );
 
         assert!(
-            self.bids.get(&property_id).is_none(),
+            self.bids
+                .get(&property_id)
+                .map(|bids| !bids.iter().any(|b| b.status == BidStatus::Pending))
+                .unwrap_or(true),
             "Cannot delist property with active bids"
         );
 
         assert!(
-            !property.sold.is_none(),
+            property.sold.is_none(),
             "Cannot delist property that has been sold"
         );
         property.is_for_sale = false;
@@ -535,7 +538,10 @@ impl ShedaContract {
         assert!(property.sold.is_none(), "Cannot delete a sold property");
 
         assert!(
-            self.bids.get(&property_id.clone()).is_none(),
+            self.bids
+                .get(&property_id)
+                .map(|bids| !bids.iter().any(|b| b.status == BidStatus::Pending))
+                .unwrap_or(true),
             "Cannot delete property with active bids"
         );
 

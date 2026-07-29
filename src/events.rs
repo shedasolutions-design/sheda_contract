@@ -69,6 +69,17 @@ pub struct DealFinalizedEvent {
     pub lease_duration_nanos: u64,
 }
 
+/// Event emitted when a tenant's lease renewal bid is accepted by the owner
+#[derive(Serialize, Deserialize)]
+pub struct LeaseRenewedEvent {
+    pub token_id: u64,
+    pub lease_id: u64,
+    pub tenant_id: AccountId,
+    pub owner_id: AccountId,
+    pub amount: u128,
+    pub new_end_time: u64,
+}
+
 /// Event emitted when a dispute is raised
 #[derive(Serialize, Deserialize)]
 pub struct DisputeRaisedEvent {

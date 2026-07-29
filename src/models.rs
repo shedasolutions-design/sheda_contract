@@ -110,6 +110,12 @@ pub struct Bid {
     pub escrow_release_after: Option<Timestamp>,
     pub action: Action,
     pub stablecoin_token: AccountId,
+    /// Set once this bid results in a Lease (whichever accept path created
+    /// it, plus renewals). Lets a client look up the authoritative
+    /// start_time/end_time/active via get_lease_by_id at any time, even
+    /// after property.active_lease has been cleared by expire_lease —
+    /// that field only reflects the *current* lease, not this bid's.
+    pub lease_id: Option<u64>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
@@ -244,6 +250,7 @@ pub struct BidView {
     pub escrow_release_after: Option<Timestamp>,
     pub action: Action,
     pub stablecoin_token: String,
+    pub lease_id: Option<u64>,
 }
 
 impl Property {
@@ -339,6 +346,7 @@ impl Bid {
             escrow_release_after: self.escrow_release_after,
             action: self.action.clone(),
             stablecoin_token: self.stablecoin_token.to_string(),
+            lease_id: self.lease_id,
         }
     }
 }

@@ -7,8 +7,8 @@ use near_sdk::{
 use crate::{
     events::{
         emit_event, BidApprovedEvent, BidCancelledEvent, BidRefundedEvent, BidRejectedEvent,
-        DealFinalizedEvent, DisputeRaisedEvent, LeaseExpiredEvent, PropertyDeletedEvent,
-        PropertyDelistedEvent,
+        DealFinalizedEvent, DisputeRaisedEvent, LeaseExpiredEvent, LeaseRenewedEvent,
+        PropertyDeletedEvent, PropertyDelistedEvent,
     },
     ext::ft_contract,
     models::{Action, Bid, BidStatus},
@@ -159,18 +159,35 @@ pub fn burn_nft(contract: &mut ShedaContract, token_id: String) {
 
 pub fn internal_accept_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) -> Promise {
     lock_bid(contract, property_id, bid_id);
-    let owner_id = {
+    let (owner_id, has_active_lease) = {
         let property = contract
             .properties
             .get(&property_id)
             .expect("Property does not exist");
-        property.owner_id.clone()
+        (
+            property.owner_id.clone(),
+            property
+                .active_lease
+                .as_ref()
+                .map(|lease| lease.active)
+                .unwrap_or(false),
+        )
     };
 
     assert_eq!(
         owner_id,
         env::predecessor_account_id(),
         "Only the property owner can accept bids"
+    );
+
+    // finalize_accepted_bid() (Purchase and Lease alike) transfers the NFT
+    // from property.owner_id to the bidder. While a lease is active the NFT
+    // is actually held by the tenant, not the owner, so that transfer would
+    // panic there instead of failing cleanly here — after payment has
+    // already gone out on the accept_bid fast path. Reject up front instead.
+    require!(
+        !has_active_lease,
+        "Cannot accept a bid while the property has an active lease"
     );
 
     let now = env::block_timestamp();
@@ -280,12 +297,60 @@ pub fn accept_bid_callback(contract: &mut ShedaContract, property_id: u64, bid_i
                 });
             }
 
-            env::panic_str("Payment transfer failed. Bid acceptance aborted.");
+            // NOTE: do not panic here. A panicking receipt discards every state
+            // write it made in this same call, including the revert above, which
+            // would otherwise leave the balance permanently short and the bid
+            // stuck in `Accepted` with no way to retry/cancel/reject it.
+            log!("Payment transfer failed. Bid acceptance aborted; balance and status reverted to Pending.");
         }
     }
 }
 
-pub fn internal_reject_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) {
+// Shared callback for the refund transfers fired from internal_reject_bid,
+// internal_cancel_bid, and the "refund other pending bidders" loops in
+// internal_accept_bid_with_escrow / finalize_accepted_bid. Those call sites
+// optimistically decrement the ledger and flip the bid to a terminal status
+// before the transfer confirms; if the transfer actually fails (e.g. the
+// bidder's account isn't storage-registered on the token contract), this
+// callback puts both back so the refund can be retried instead of the funds
+// silently vanishing from the contract's own accounting.
+pub fn refund_pending_bid_callback(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+    stablecoin_token: AccountId,
+    amount: u128,
+) {
+    match env::promise_result(0) {
+        PromiseResult::Successful(_) => {
+            log!("Refund transfer for bid {} succeeded", bid_id);
+        }
+        PromiseResult::Failed => {
+            let current_balance = *contract
+                .stable_coin_balances
+                .get(&stablecoin_token)
+                .unwrap_or(&0);
+            contract.stable_coin_balances.insert(
+                stablecoin_token,
+                checked_add_u128(current_balance, amount, "refund_pending_bid revert"),
+            );
+
+            if let Some(bids) = contract.bids.get_mut(&property_id) {
+                let _ = update_bid_in_list(bids, bid_id, |bid| {
+                    bid.status = BidStatus::Pending;
+                    bid.updated_at = env::block_timestamp();
+                });
+            }
+
+            log!(
+                "Refund transfer for bid {} failed; balance and status reverted to Pending",
+                bid_id
+            );
+        }
+    }
+}
+
+pub fn internal_reject_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) -> Promise {
     let bid = {
         let bids: &Vec<Bid> = contract.bids.get(&property_id).expect("Bid does not exist");
         get_bid_from_list(bids, bid_id)
@@ -312,13 +377,12 @@ pub fn internal_reject_bid(contract: &mut ShedaContract, property_id: u64, bid_i
     );
 
     // Refund stablecoin to bidder
-    #[allow(unused_must_use)]
-    ft_contract::ext(bid.stablecoin_token.clone())
+    let refund_promise = ft_contract::ext(bid.stablecoin_token.clone())
         .with_attached_deposit(NearToken::from_yoctonear(1))
         .with_static_gas(Gas::from_tgas(30))
         .ft_transfer(bid.bidder.clone(), U128(bid.amount));
 
-    // Update stablecoin balance after refund
+    // Update stablecoin balance after refund (reverted on transfer failure)
     let current_balance = *contract
         .stable_coin_balances
         .get(&bid.stablecoin_token)
@@ -343,13 +407,24 @@ pub fn internal_reject_bid(contract: &mut ShedaContract, property_id: u64, bid_i
         BidRejectedEvent {
             token_id: property_id,
             bid_id,
-            bidder_id: bid.bidder,
+            bidder_id: bid.bidder.clone(),
             amount: bid.amount,
         },
     );
+
+    refund_promise.then(
+        crate::ShedaContract::ext(env::current_account_id())
+            .with_static_gas(Gas::from_tgas(20))
+            .refund_pending_bid_callback(
+                property_id,
+                bid_id,
+                bid.stablecoin_token.clone(),
+                bid.amount,
+            ),
+    )
 }
 
-pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) {
+pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) -> Promise {
     let bid = {
         let bids: &Vec<Bid> = contract.bids.get(&property_id).expect("Bid does not exist");
         get_bid_from_list(bids, bid_id)
@@ -388,13 +463,12 @@ pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_i
     }
 
     // Refund stablecoin to bidder
-    #[allow(unused_must_use)]
-    ft_contract::ext(bid.stablecoin_token.clone())
+    let refund_promise = ft_contract::ext(bid.stablecoin_token.clone())
         .with_attached_deposit(NearToken::from_yoctonear(1))
         .with_static_gas(Gas::from_tgas(30))
         .ft_transfer(bid.bidder.clone(), U128(bid.amount));
 
-    // Update stablecoin balance after refund
+    // Update stablecoin balance after refund (reverted on transfer failure)
     let current_balance = *contract
         .stable_coin_balances
         .get(&bid.stablecoin_token)
@@ -419,10 +493,21 @@ pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_i
         BidCancelledEvent {
             token_id: property_id,
             bid_id,
-            bidder_id: bid.bidder,
+            bidder_id: bid.bidder.clone(),
             amount: bid.amount,
         },
     );
+
+    refund_promise.then(
+        crate::ShedaContract::ext(env::current_account_id())
+            .with_static_gas(Gas::from_tgas(20))
+            .refund_pending_bid_callback(
+                property_id,
+                bid_id,
+                bid.stablecoin_token.clone(),
+                bid.amount,
+            ),
+    )
 }
 
 pub fn internal_accept_bid_with_escrow(
@@ -430,18 +515,33 @@ pub fn internal_accept_bid_with_escrow(
     property_id: u64,
     bid_id: u64,
 ) -> bool {
-    let (owner_id, lease_duration_months) = {
+    let (owner_id, lease_duration_months, has_active_lease) = {
         let property = contract
             .properties
             .get(&property_id)
             .expect("Property does not exist");
-        (property.owner_id.clone(), property.lease_duration_months)
+        (
+            property.owner_id.clone(),
+            property.lease_duration_months,
+            property
+                .active_lease
+                .as_ref()
+                .map(|lease| lease.active)
+                .unwrap_or(false),
+        )
     };
 
     assert_eq!(
         owner_id,
         env::predecessor_account_id(),
         "Only the property owner can accept bids"
+    );
+
+    // See internal_accept_bid for why this has to be rejected here rather
+    // than left to fail later at NFT-transfer time.
+    require!(
+        !has_active_lease,
+        "Cannot accept a bid while the property has an active lease"
     );
 
     let now = env::block_timestamp();
@@ -499,23 +599,37 @@ pub fn internal_accept_bid_with_escrow(
                 continue;
             }
 
-            #[allow(unused_must_use)]
-            ft_contract::ext(other_bid.stablecoin_token.clone())
+            let other_bid_id = other_bid.id;
+            let other_token = other_bid.stablecoin_token.clone();
+            let other_amount = other_bid.amount;
+
+            let other_refund_promise = ft_contract::ext(other_token.clone())
                 .with_attached_deposit(NearToken::from_yoctonear(1))
                 .with_static_gas(Gas::from_tgas(30))
-                .ft_transfer(other_bid.bidder.clone(), U128(other_bid.amount));
+                .ft_transfer(other_bid.bidder.clone(), U128(other_amount));
 
             let current_balance = *contract
                 .stable_coin_balances
-                .get(&other_bid.stablecoin_token)
+                .get(&other_token)
                 .unwrap_or(&0);
             contract.stable_coin_balances.insert(
-                other_bid.stablecoin_token.clone(),
-                checked_sub_u128(current_balance, other_bid.amount, "accept_bid_with_escrow"),
+                other_token.clone(),
+                checked_sub_u128(current_balance, other_amount, "accept_bid_with_escrow"),
             );
 
             other_bid.status = BidStatus::Rejected;
             other_bid.updated_at = env::block_timestamp();
+
+            other_refund_promise.then(
+                crate::ShedaContract::ext(env::current_account_id())
+                    .with_static_gas(Gas::from_tgas(20))
+                    .refund_pending_bid_callback(
+                        property_id,
+                        other_bid_id,
+                        other_token,
+                        other_amount,
+                    ),
+            );
         }
     }
 
@@ -547,10 +661,27 @@ pub fn internal_accept_bid_with_escrow(
             escrow_held: bid.amount,
             escrow_token: bid.stablecoin_token.clone(),
         };
+        let lease_id = lease.id;
         updated_property.active_lease = Some(lease.clone());
         contract.leases.insert(lease.id, lease);
         contract.lease_counter = checked_add_u64(contract.lease_counter, 1, "lease_counter");
         contract.properties.insert(property_id, updated_property);
+
+        let mut tenant_leases = contract
+            .lease_per_tenant
+            .get(&bid.bidder)
+            .cloned()
+            .unwrap_or_default();
+        tenant_leases.push(lease_id);
+        contract
+            .lease_per_tenant
+            .insert(bid.bidder.clone(), tenant_leases);
+
+        if let Some(bids) = contract.bids.get_mut(&property_id) {
+            let _ = update_bid_in_list(bids, bid_id, |b| {
+                b.lease_id = Some(lease_id);
+            });
+        }
 
         emit_event(
             "DealFinalized",
@@ -611,23 +742,37 @@ fn finalize_accepted_bid(contract: &mut ShedaContract, property_id: u64, bid_id:
                 continue;
             }
 
-            #[allow(unused_must_use)]
-            ft_contract::ext(other_bid.stablecoin_token.clone())
+            let other_bid_id = other_bid.id;
+            let other_token = other_bid.stablecoin_token.clone();
+            let other_amount = other_bid.amount;
+
+            let other_refund_promise = ft_contract::ext(other_token.clone())
                 .with_attached_deposit(NearToken::from_yoctonear(1))
                 .with_static_gas(Gas::from_tgas(30))
-                .ft_transfer(other_bid.bidder.clone(), U128(other_bid.amount));
+                .ft_transfer(other_bid.bidder.clone(), U128(other_amount));
 
             let current_balance = *contract
                 .stable_coin_balances
-                .get(&other_bid.stablecoin_token)
+                .get(&other_token)
                 .unwrap_or(&0);
             contract.stable_coin_balances.insert(
-                other_bid.stablecoin_token.clone(),
-                checked_sub_u128(current_balance, other_bid.amount, "accept_bid refund"),
+                other_token.clone(),
+                checked_sub_u128(current_balance, other_amount, "accept_bid refund"),
             );
 
             other_bid.status = BidStatus::Rejected;
             other_bid.updated_at = env::block_timestamp();
+
+            other_refund_promise.then(
+                crate::ShedaContract::ext(env::current_account_id())
+                    .with_static_gas(Gas::from_tgas(20))
+                    .refund_pending_bid_callback(
+                        property_id,
+                        other_bid_id,
+                        other_token,
+                        other_amount,
+                    ),
+            );
         }
     }
 
@@ -677,10 +822,27 @@ fn finalize_accepted_bid(contract: &mut ShedaContract, property_id: u64, bid_id:
                 escrow_held: bid.amount,
                 escrow_token: bid.stablecoin_token.clone(),
             };
+            let lease_id = lease.id;
             updated_property.active_lease = Some(lease.clone());
             contract.leases.insert(lease.id, lease);
             contract.lease_counter = checked_add_u64(contract.lease_counter, 1, "lease_counter");
             contract.properties.insert(property_id, updated_property);
+
+            let mut tenant_leases = contract
+                .lease_per_tenant
+                .get(&bid.bidder)
+                .cloned()
+                .unwrap_or_default();
+            tenant_leases.push(lease_id);
+            contract
+                .lease_per_tenant
+                .insert(bid.bidder.clone(), tenant_leases);
+
+            if let Some(bids) = contract.bids.get_mut(&property_id) {
+                let _ = update_bid_in_list(bids, bid_id, |b| {
+                    b.lease_id = Some(lease_id);
+                });
+            }
 
             emit_event(
                 "DealFinalized",
@@ -699,6 +861,273 @@ fn finalize_accepted_bid(contract: &mut ShedaContract, property_id: u64, bid_id:
             );
         }
     }
+}
+
+// ---- Lease renewal ----
+//
+// A renewal is a Lease bid placed the normal way (ft_on_transfer) by the
+// account that already holds the property's active lease. Unlike a regular
+// bid it doesn't compete for the NFT — the tenant already has it — so it
+// skips the NFT-transfer machinery entirely and just extends the existing
+// Lease and mints this term's own document. accept_bid/accept_bid_with_escrow
+// deliberately refuse to touch a bid while the property has an active lease
+// (see their has_active_lease guard); this is the one path allowed to act
+// while a lease is active, and only for the current tenant's own bid.
+pub fn internal_accept_lease_renewal(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+) -> Promise {
+    lock_bid(contract, property_id, bid_id);
+
+    let (owner_id, lease_duration_months, current_lease) = {
+        let property = contract
+            .properties
+            .get(&property_id)
+            .expect("Property does not exist");
+        (
+            property.owner_id.clone(),
+            property.lease_duration_months,
+            property.active_lease.clone(),
+        )
+    };
+
+    assert_eq!(
+        owner_id,
+        env::predecessor_account_id(),
+        "Only the property owner can accept a lease renewal"
+    );
+
+    let lease = current_lease.expect("Property has no active lease to renew");
+    let duration_months =
+        lease_duration_months.expect("Property is not configured with a lease duration");
+
+    let bid = {
+        let bids = contract.bids.get(&property_id).expect("Bid does not exist");
+        get_bid_from_list(bids, bid_id)
+    };
+
+    assert_eq!(
+        bid.property_id, property_id,
+        "Bid is not for the specified property"
+    );
+    require!(
+        matches!(&bid.action, Action::Lease),
+        "Renewal bid must be a Lease bid"
+    );
+    require!(
+        bid.status == BidStatus::Pending,
+        "Bid is not in a pending state"
+    );
+    assert_eq!(
+        bid.bidder, lease.tenant_id,
+        "Only the current tenant's own bid can be accepted as a renewal"
+    );
+
+    // Extend from the lease's own end_time, not from now — renewing a few
+    // days early (or a few days after end_time, before anyone reclaims)
+    // shouldn't shift the schedule or waste/duplicate any paid-for time.
+    let new_end_time = checked_add_u64(
+        lease.end_time,
+        checked_mul_u64(
+            duration_months,
+            30 * 24 * 60 * 60 * 1_000_000_000,
+            "renewal duration",
+        ),
+        "renewal end_time",
+    );
+
+    {
+        let bids = contract
+            .bids
+            .get_mut(&property_id)
+            .expect("Bid does not exist");
+        update_bid_in_list(bids, bid_id, |b| {
+            b.status = BidStatus::Accepted;
+            b.updated_at = env::block_timestamp();
+            b.lease_id = Some(lease.id);
+        });
+    }
+
+    emit_event(
+        "BidApproved",
+        BidApprovedEvent {
+            token_id: property_id,
+            bidder_id: bid.bidder.clone(),
+            seller_id: owner_id.clone(),
+            amount: bid.amount,
+        },
+    );
+
+    let promise = ft_contract::ext(bid.stablecoin_token.clone())
+        .with_attached_deposit(NearToken::from_yoctonear(1))
+        .with_static_gas(Gas::from_tgas(30))
+        .ft_transfer(owner_id.clone(), U128(bid.amount));
+
+    let current_balance = *contract
+        .stable_coin_balances
+        .get(&bid.stablecoin_token)
+        .unwrap_or(&0);
+    contract.stable_coin_balances.insert(
+        bid.stablecoin_token.clone(),
+        checked_sub_u128(current_balance, bid.amount, "accept_lease_renewal balance"),
+    );
+
+    promise.then(
+        crate::ShedaContract::ext(env::current_account_id())
+            .with_static_gas(Gas::from_tgas(50))
+            .accept_lease_renewal_callback(property_id, bid_id, new_end_time),
+    )
+}
+
+pub fn accept_lease_renewal_callback(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+    new_end_time: u64,
+) {
+    unlock_bid(contract, property_id, bid_id);
+    match env::promise_result(0) {
+        PromiseResult::Successful(_) => {
+            let bid = {
+                let bids = contract.bids.get(&property_id).expect("Bid does not exist");
+                get_bid_from_list(bids, bid_id)
+            };
+            let lease_id = bid.lease_id.expect("Renewal bid missing lease_id");
+
+            let mut lease = contract
+                .leases
+                .get(&lease_id)
+                .cloned()
+                .expect("Lease not found");
+            lease.end_time = new_end_time;
+            lease.active = true;
+            contract.leases.insert(lease_id, lease.clone());
+
+            let mut property = contract
+                .properties
+                .get(&property_id)
+                .cloned()
+                .expect("Property does not exist");
+            property.active_lease = Some(lease.clone());
+            let owner_id = property.owner_id.clone();
+            contract.properties.insert(property_id, property);
+
+            // This renewal's own permanent document — never touches or
+            // reissues the original term's token.
+            let document_token_id = format!("doc:{}:{}", property_id, bid_id);
+            let token_metadata =
+                near_contract_standards::non_fungible_token::metadata::TokenMetadata {
+                    title: Some(format!(
+                        "Rent Agreement (Renewal) #{} — Property #{}",
+                        bid_id, property_id
+                    )),
+                    description: Some(format!(
+                        "Lease renewal for property #{}, new term ends at {}",
+                        property_id, new_end_time
+                    )),
+                    copies: Some(1),
+                    extra: Some(build_document_extra(
+                        property_id,
+                        bid_id,
+                        "Lease",
+                        true,
+                        Some(lease.start_time),
+                        Some(new_end_time),
+                    )),
+                    ..Default::default()
+                };
+            contract.tokens.internal_mint(
+                document_token_id.clone(),
+                owner_id.clone(),
+                Some(token_metadata),
+            );
+            contract.tokens.internal_transfer(
+                &owner_id,
+                &bid.bidder,
+                &document_token_id,
+                None,
+                None,
+            );
+
+            if let Some(bids) = contract.bids.get_mut(&property_id) {
+                let _ = update_bid_in_list(bids, bid_id, |b| {
+                    b.status = BidStatus::Completed;
+                    b.updated_at = env::block_timestamp();
+                    b.document_token_id = Some(document_token_id.clone());
+                    b.escrow_release_tx = Some(format!("block:{}", env::block_height()));
+                });
+            }
+
+            emit_event(
+                "LeaseRenewed",
+                LeaseRenewedEvent {
+                    token_id: property_id,
+                    lease_id,
+                    tenant_id: bid.bidder.clone(),
+                    owner_id,
+                    amount: bid.amount,
+                    new_end_time,
+                },
+            );
+        }
+        PromiseResult::Failed => {
+            let bid = {
+                let bids: &Vec<Bid> = contract.bids.get(&property_id).expect("Bid does not exist");
+                get_bid_from_list(bids, bid_id)
+            };
+
+            let current_balance = *contract
+                .stable_coin_balances
+                .get(&bid.stablecoin_token)
+                .unwrap_or(&0);
+            contract.stable_coin_balances.insert(
+                bid.stablecoin_token.clone(),
+                checked_add_u128(current_balance, bid.amount, "accept_lease_renewal revert"),
+            );
+
+            if let Some(bids) = contract.bids.get_mut(&property_id) {
+                let _ = update_bid_in_list(bids, bid_id, |b| {
+                    b.status = BidStatus::Pending;
+                    b.updated_at = env::block_timestamp();
+                    b.lease_id = None;
+                });
+            }
+
+            log!("Lease renewal payment failed; balance and status reverted to Pending.");
+        }
+    }
+}
+
+// Every document/agreement token this contract mints must be traceable back
+// to the exact property it's for — the token_id already encodes it
+// ("doc:{property_id}:{bid_id}"), but that only helps a caller who knows to
+// parse the id. This puts the same information in the title (human-readable)
+// and in `extra` as machine-readable JSON, for indexers/wallets/the app to
+// read directly without parsing IDs. All interpolated values here are
+// non-string (u64/bool) or a literal we control ("Purchase"/"Lease"), so
+// plain string formatting is safe — no untrusted input needs escaping.
+fn build_document_extra(
+    property_id: u64,
+    bid_id: u64,
+    action_label: &str,
+    is_renewal: bool,
+    lease_start: Option<u64>,
+    lease_end: Option<u64>,
+) -> String {
+    format!(
+        "{{\"property_id\":{},\"bid_id\":{},\"action\":\"{}\",\"is_renewal\":{},\"lease_start\":{},\"lease_end\":{}}}",
+        property_id,
+        bid_id,
+        action_label,
+        is_renewal,
+        lease_start
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        lease_end
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+    )
 }
 
 pub fn internal_confirm_document_release(
@@ -746,16 +1175,36 @@ pub fn internal_confirm_document_release(
     }
 
     let document_token_id = format!("doc:{}:{}", property_id, bid_id);
-    let agreement_label = match bid_snapshot.action {
-        Action::Purchase => "Property Document",
-        Action::Lease => "Rent Agreement",
+    let (agreement_label, action_label) = match bid_snapshot.action {
+        Action::Purchase => ("Property Document", "Purchase"),
+        Action::Lease => ("Rent Agreement", "Lease"),
     };
 
+    // Path B (accept_bid_with_escrow) — the only path that reaches this
+    // function — already creates the Lease before docs can be released, so
+    // bid_snapshot.lease_id and its real start/end are available here.
+    let (lease_start, lease_end) = bid_snapshot
+        .lease_id
+        .and_then(|id| contract.leases.get(&id))
+        .map(|lease| (Some(lease.start_time), Some(lease.end_time)))
+        .unwrap_or((None, None));
+
     let token_metadata = near_contract_standards::non_fungible_token::metadata::TokenMetadata {
-        title: Some(format!("{} #{}", agreement_label, bid_id)),
+        title: Some(format!(
+            "{} #{} — Property #{}",
+            agreement_label, bid_id, property_id
+        )),
         description: Some(trimmed_description.to_string()),
         media: Some(trimmed_uri.to_string()),
         copies: Some(1),
+        extra: Some(build_document_extra(
+            property_id,
+            bid_id,
+            action_label,
+            false,
+            lease_start,
+            lease_end,
+        )),
         ..Default::default()
     };
 
@@ -920,6 +1369,13 @@ pub fn release_escrow_callback(contract: &mut ShedaContract, property_id: u64, b
                     contract.properties.insert(property_id, updated_property);
                 }
                 Action::Lease => {
+                    // The Lease record was already created in
+                    // internal_accept_bid_with_escrow when the bid was accepted
+                    // (escrow_held there tracks the funds we just released).
+                    // Creating a second Lease here would orphan that first
+                    // record (it stays active/untracked in `leases`) and would
+                    // never be indexed in `lease_per_tenant`, so all we do at
+                    // this stage is hand over the NFT.
                     contract.tokens.internal_transfer(
                         &property.owner_id,
                         &bid.bidder,
@@ -927,33 +1383,6 @@ pub fn release_escrow_callback(contract: &mut ShedaContract, property_id: u64, b
                         None,
                         None,
                     );
-
-                    let mut updated_property = property.clone();
-                    let lease = crate::models::Lease {
-                        id: contract.lease_counter,
-                        property_id,
-                        tenant_id: bid.bidder.clone(),
-                        start_time: env::block_timestamp(),
-                        end_time: checked_add_u64(
-                            env::block_timestamp(),
-                            checked_mul_u64(
-                                property.lease_duration_months.unwrap(),
-                                30 * 24 * 60 * 60 * 1_000_000_000,
-                                "lease duration",
-                            ),
-                            "lease end_time",
-                        ),
-                        active: true,
-                        dispute_status: crate::models::DisputeStatus::None,
-                        dispute: None,
-                        escrow_held: bid.amount,
-                        escrow_token: bid.stablecoin_token.clone(),
-                    };
-                    updated_property.active_lease = Some(lease.clone());
-                    contract.leases.insert(lease.id, lease);
-                    contract.lease_counter =
-                        checked_add_u64(contract.lease_counter, 1, "lease_counter");
-                    contract.properties.insert(property_id, updated_property);
                 }
             }
         }
@@ -979,7 +1408,10 @@ pub fn release_escrow_callback(contract: &mut ShedaContract, property_id: u64, b
                 });
             }
 
-            env::panic_str("Escrow release failed. Payment transfer aborted.");
+            // NOTE: do not panic here, it would discard the revert writes above
+            // (a panicking receipt rolls back every state change it made) and
+            // leave the balance short with the bid stuck past DocsConfirmed.
+            log!("Escrow release failed. Payment transfer aborted; balance and status reverted to DocsConfirmed.");
         }
     }
 }
@@ -1145,7 +1577,9 @@ pub fn refund_escrow_timeout_callback(
                 checked_add_u128(current_balance, amount, "refund_escrow_timeout revert"),
             );
 
-            env::panic_str("Timeout refund failed. Balance reverted.");
+            // NOTE: no panic here — see accept_bid_callback/release_escrow_callback
+            // for why a trailing panic would discard this very revert write.
+            log!("Timeout refund failed. Balance reverted.");
         }
     }
 }
@@ -1194,7 +1628,7 @@ pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) 
 
     assert_eq!(
         property.owner_id,
-        env::signer_account_id(),
+        env::predecessor_account_id(),
         "Only the property owner can delete the property"
     );
 
@@ -1228,7 +1662,7 @@ pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) 
         "PropertyDeleted",
         PropertyDeletedEvent {
             token_id: property_id,
-            actor_id: env::signer_account_id(),
+            actor_id: env::predecessor_account_id(),
         },
     );
 }

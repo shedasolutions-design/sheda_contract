@@ -6,7 +6,10 @@ pub mod models;
 pub mod views;
 
 pub mod ext;
-use crate::{events::{BidPlacedEvent, LostBidClaimedEvent, PropertyMintedEvent, emit_event}, models::Sold};
+use crate::{
+    events::{emit_event, BidPlacedEvent, LostBidClaimedEvent, PropertyMintedEvent},
+    models::Sold,
+};
 #[allow(unused_imports)]
 use crate::models::{Bid, BidStatus, ContractError, DisputeStatus, Lease, Property};
 use crate::{internal::*, models::Action};
@@ -99,7 +102,7 @@ pub struct OldBid {
     pub stablecoin_token: AccountId,
 }
 
-#[derive(BorshDeserialize, BorshSerialize,Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Clone)]
 pub struct OldLease {
     pub id: u64,
     pub property_id: u64,

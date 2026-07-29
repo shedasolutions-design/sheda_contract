@@ -430,6 +430,12 @@ impl ShedaContract {
                     escrow_release_after: old_bid.escrow_release_after,
                     action: old_bid.action.clone(),
                     stablecoin_token: old_bid.stablecoin_token.clone(),
+                    // Pre-upgrade bids never tracked this; a bid already
+                    // tied to a lease before this migration just falls back
+                    // to the client's estimate path instead of the precise
+                    // get_lease_by_id lookup — no regression, just no gain
+                    // for that narrow pre-existing set.
+                    lease_id: None,
                 })
                 .collect();
             migrated_bids.insert(*property_id, new_bids);
@@ -759,6 +765,7 @@ impl ShedaContract {
             escrow_release_after: None,
             action: bid_action.action.clone(),
             stablecoin_token: env::predecessor_account_id(),
+            lease_id: None,
         };
 
         internal::lock_ft_on_transfer(self, property_id, &sender_id_guard);
@@ -800,6 +807,27 @@ impl ShedaContract {
     #[payable]
     pub fn accept_bid_with_escrow(&mut self, bid_id: u64, property_id: u64) -> bool {
         internal::internal_accept_bid_with_escrow(self, property_id, bid_id)
+    }
+
+    /// Owner accepts a renewal bid from the property's current tenant:
+    /// extends the active lease from its own end_time (same duration as the
+    /// property's configured lease_duration_months) and mints that term's
+    /// own document. No 24h escrow timelock and no NFT transfer — the
+    /// tenant already holds the property NFT, this only ever needs to
+    /// authenticate the current tenant + payment.
+    #[payable]
+    pub fn accept_lease_renewal(&mut self, bid_id: u64, property_id: u64) -> near_sdk::Promise {
+        internal::internal_accept_lease_renewal(self, property_id, bid_id)
+    }
+
+    #[private]
+    pub fn accept_lease_renewal_callback(
+        &mut self,
+        property_id: u64,
+        bid_id: u64,
+        new_end_time: u64,
+    ) {
+        internal::accept_lease_renewal_callback(self, property_id, bid_id, new_end_time);
     }
 
     #[private]

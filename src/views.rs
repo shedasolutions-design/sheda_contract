@@ -71,6 +71,7 @@ pub struct BidView {
     pub escrow_release_after: Option<u64>,
     pub action: Action,
     pub stablecoin_token: String,
+    pub lease_id: Option<u64>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -165,6 +166,7 @@ impl From<&Bid> for BidView {
             escrow_release_after: bid.escrow_release_after,
             action: bid.action.clone(),
             stablecoin_token: bid.stablecoin_token.to_string(),
+            lease_id: bid.lease_id,
         }
     }
 }

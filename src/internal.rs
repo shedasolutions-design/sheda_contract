@@ -7,8 +7,8 @@ use near_sdk::{
 use crate::{
     events::{
         emit_event, BidApprovedEvent, BidCancelledEvent, BidRefundedEvent, BidRejectedEvent,
-        DealFinalizedEvent, DisputeRaisedEvent, LeaseExpiredEvent, PropertyDeletedEvent,
-        PropertyDelistedEvent,
+        DealFinalizedEvent, DisputeRaisedEvent, LeaseExpiredEvent, LeaseRenewedEvent,
+        PropertyDeletedEvent, PropertyDelistedEvent,
     },
     ext::ft_contract,
     models::{Action, Bid, BidStatus},
@@ -677,6 +677,12 @@ pub fn internal_accept_bid_with_escrow(
             .lease_per_tenant
             .insert(bid.bidder.clone(), tenant_leases);
 
+        if let Some(bids) = contract.bids.get_mut(&property_id) {
+            let _ = update_bid_in_list(bids, bid_id, |b| {
+                b.lease_id = Some(lease_id);
+            });
+        }
+
         emit_event(
             "DealFinalized",
             DealFinalizedEvent {
@@ -832,6 +838,12 @@ fn finalize_accepted_bid(contract: &mut ShedaContract, property_id: u64, bid_id:
                 .lease_per_tenant
                 .insert(bid.bidder.clone(), tenant_leases);
 
+            if let Some(bids) = contract.bids.get_mut(&property_id) {
+                let _ = update_bid_in_list(bids, bid_id, |b| {
+                    b.lease_id = Some(lease_id);
+                });
+            }
+
             emit_event(
                 "DealFinalized",
                 DealFinalizedEvent {
@@ -849,6 +861,273 @@ fn finalize_accepted_bid(contract: &mut ShedaContract, property_id: u64, bid_id:
             );
         }
     }
+}
+
+// ---- Lease renewal ----
+//
+// A renewal is a Lease bid placed the normal way (ft_on_transfer) by the
+// account that already holds the property's active lease. Unlike a regular
+// bid it doesn't compete for the NFT — the tenant already has it — so it
+// skips the NFT-transfer machinery entirely and just extends the existing
+// Lease and mints this term's own document. accept_bid/accept_bid_with_escrow
+// deliberately refuse to touch a bid while the property has an active lease
+// (see their has_active_lease guard); this is the one path allowed to act
+// while a lease is active, and only for the current tenant's own bid.
+pub fn internal_accept_lease_renewal(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+) -> Promise {
+    lock_bid(contract, property_id, bid_id);
+
+    let (owner_id, lease_duration_months, current_lease) = {
+        let property = contract
+            .properties
+            .get(&property_id)
+            .expect("Property does not exist");
+        (
+            property.owner_id.clone(),
+            property.lease_duration_months,
+            property.active_lease.clone(),
+        )
+    };
+
+    assert_eq!(
+        owner_id,
+        env::predecessor_account_id(),
+        "Only the property owner can accept a lease renewal"
+    );
+
+    let lease = current_lease.expect("Property has no active lease to renew");
+    let duration_months =
+        lease_duration_months.expect("Property is not configured with a lease duration");
+
+    let bid = {
+        let bids = contract.bids.get(&property_id).expect("Bid does not exist");
+        get_bid_from_list(bids, bid_id)
+    };
+
+    assert_eq!(
+        bid.property_id, property_id,
+        "Bid is not for the specified property"
+    );
+    require!(
+        matches!(&bid.action, Action::Lease),
+        "Renewal bid must be a Lease bid"
+    );
+    require!(
+        bid.status == BidStatus::Pending,
+        "Bid is not in a pending state"
+    );
+    assert_eq!(
+        bid.bidder, lease.tenant_id,
+        "Only the current tenant's own bid can be accepted as a renewal"
+    );
+
+    // Extend from the lease's own end_time, not from now — renewing a few
+    // days early (or a few days after end_time, before anyone reclaims)
+    // shouldn't shift the schedule or waste/duplicate any paid-for time.
+    let new_end_time = checked_add_u64(
+        lease.end_time,
+        checked_mul_u64(
+            duration_months,
+            30 * 24 * 60 * 60 * 1_000_000_000,
+            "renewal duration",
+        ),
+        "renewal end_time",
+    );
+
+    {
+        let bids = contract
+            .bids
+            .get_mut(&property_id)
+            .expect("Bid does not exist");
+        update_bid_in_list(bids, bid_id, |b| {
+            b.status = BidStatus::Accepted;
+            b.updated_at = env::block_timestamp();
+            b.lease_id = Some(lease.id);
+        });
+    }
+
+    emit_event(
+        "BidApproved",
+        BidApprovedEvent {
+            token_id: property_id,
+            bidder_id: bid.bidder.clone(),
+            seller_id: owner_id.clone(),
+            amount: bid.amount,
+        },
+    );
+
+    let promise = ft_contract::ext(bid.stablecoin_token.clone())
+        .with_attached_deposit(NearToken::from_yoctonear(1))
+        .with_static_gas(Gas::from_tgas(30))
+        .ft_transfer(owner_id.clone(), U128(bid.amount));
+
+    let current_balance = *contract
+        .stable_coin_balances
+        .get(&bid.stablecoin_token)
+        .unwrap_or(&0);
+    contract.stable_coin_balances.insert(
+        bid.stablecoin_token.clone(),
+        checked_sub_u128(current_balance, bid.amount, "accept_lease_renewal balance"),
+    );
+
+    promise.then(
+        crate::ShedaContract::ext(env::current_account_id())
+            .with_static_gas(Gas::from_tgas(50))
+            .accept_lease_renewal_callback(property_id, bid_id, new_end_time),
+    )
+}
+
+pub fn accept_lease_renewal_callback(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+    new_end_time: u64,
+) {
+    unlock_bid(contract, property_id, bid_id);
+    match env::promise_result(0) {
+        PromiseResult::Successful(_) => {
+            let bid = {
+                let bids = contract.bids.get(&property_id).expect("Bid does not exist");
+                get_bid_from_list(bids, bid_id)
+            };
+            let lease_id = bid.lease_id.expect("Renewal bid missing lease_id");
+
+            let mut lease = contract
+                .leases
+                .get(&lease_id)
+                .cloned()
+                .expect("Lease not found");
+            lease.end_time = new_end_time;
+            lease.active = true;
+            contract.leases.insert(lease_id, lease.clone());
+
+            let mut property = contract
+                .properties
+                .get(&property_id)
+                .cloned()
+                .expect("Property does not exist");
+            property.active_lease = Some(lease.clone());
+            let owner_id = property.owner_id.clone();
+            contract.properties.insert(property_id, property);
+
+            // This renewal's own permanent document — never touches or
+            // reissues the original term's token.
+            let document_token_id = format!("doc:{}:{}", property_id, bid_id);
+            let token_metadata =
+                near_contract_standards::non_fungible_token::metadata::TokenMetadata {
+                    title: Some(format!(
+                        "Rent Agreement (Renewal) #{} — Property #{}",
+                        bid_id, property_id
+                    )),
+                    description: Some(format!(
+                        "Lease renewal for property #{}, new term ends at {}",
+                        property_id, new_end_time
+                    )),
+                    copies: Some(1),
+                    extra: Some(build_document_extra(
+                        property_id,
+                        bid_id,
+                        "Lease",
+                        true,
+                        Some(lease.start_time),
+                        Some(new_end_time),
+                    )),
+                    ..Default::default()
+                };
+            contract.tokens.internal_mint(
+                document_token_id.clone(),
+                owner_id.clone(),
+                Some(token_metadata),
+            );
+            contract.tokens.internal_transfer(
+                &owner_id,
+                &bid.bidder,
+                &document_token_id,
+                None,
+                None,
+            );
+
+            if let Some(bids) = contract.bids.get_mut(&property_id) {
+                let _ = update_bid_in_list(bids, bid_id, |b| {
+                    b.status = BidStatus::Completed;
+                    b.updated_at = env::block_timestamp();
+                    b.document_token_id = Some(document_token_id.clone());
+                    b.escrow_release_tx = Some(format!("block:{}", env::block_height()));
+                });
+            }
+
+            emit_event(
+                "LeaseRenewed",
+                LeaseRenewedEvent {
+                    token_id: property_id,
+                    lease_id,
+                    tenant_id: bid.bidder.clone(),
+                    owner_id,
+                    amount: bid.amount,
+                    new_end_time,
+                },
+            );
+        }
+        PromiseResult::Failed => {
+            let bid = {
+                let bids: &Vec<Bid> = contract.bids.get(&property_id).expect("Bid does not exist");
+                get_bid_from_list(bids, bid_id)
+            };
+
+            let current_balance = *contract
+                .stable_coin_balances
+                .get(&bid.stablecoin_token)
+                .unwrap_or(&0);
+            contract.stable_coin_balances.insert(
+                bid.stablecoin_token.clone(),
+                checked_add_u128(current_balance, bid.amount, "accept_lease_renewal revert"),
+            );
+
+            if let Some(bids) = contract.bids.get_mut(&property_id) {
+                let _ = update_bid_in_list(bids, bid_id, |b| {
+                    b.status = BidStatus::Pending;
+                    b.updated_at = env::block_timestamp();
+                    b.lease_id = None;
+                });
+            }
+
+            log!("Lease renewal payment failed; balance and status reverted to Pending.");
+        }
+    }
+}
+
+// Every document/agreement token this contract mints must be traceable back
+// to the exact property it's for — the token_id already encodes it
+// ("doc:{property_id}:{bid_id}"), but that only helps a caller who knows to
+// parse the id. This puts the same information in the title (human-readable)
+// and in `extra` as machine-readable JSON, for indexers/wallets/the app to
+// read directly without parsing IDs. All interpolated values here are
+// non-string (u64/bool) or a literal we control ("Purchase"/"Lease"), so
+// plain string formatting is safe — no untrusted input needs escaping.
+fn build_document_extra(
+    property_id: u64,
+    bid_id: u64,
+    action_label: &str,
+    is_renewal: bool,
+    lease_start: Option<u64>,
+    lease_end: Option<u64>,
+) -> String {
+    format!(
+        "{{\"property_id\":{},\"bid_id\":{},\"action\":\"{}\",\"is_renewal\":{},\"lease_start\":{},\"lease_end\":{}}}",
+        property_id,
+        bid_id,
+        action_label,
+        is_renewal,
+        lease_start
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        lease_end
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+    )
 }
 
 pub fn internal_confirm_document_release(
@@ -896,16 +1175,36 @@ pub fn internal_confirm_document_release(
     }
 
     let document_token_id = format!("doc:{}:{}", property_id, bid_id);
-    let agreement_label = match bid_snapshot.action {
-        Action::Purchase => "Property Document",
-        Action::Lease => "Rent Agreement",
+    let (agreement_label, action_label) = match bid_snapshot.action {
+        Action::Purchase => ("Property Document", "Purchase"),
+        Action::Lease => ("Rent Agreement", "Lease"),
     };
 
+    // Path B (accept_bid_with_escrow) — the only path that reaches this
+    // function — already creates the Lease before docs can be released, so
+    // bid_snapshot.lease_id and its real start/end are available here.
+    let (lease_start, lease_end) = bid_snapshot
+        .lease_id
+        .and_then(|id| contract.leases.get(&id))
+        .map(|lease| (Some(lease.start_time), Some(lease.end_time)))
+        .unwrap_or((None, None));
+
     let token_metadata = near_contract_standards::non_fungible_token::metadata::TokenMetadata {
-        title: Some(format!("{} #{}", agreement_label, bid_id)),
+        title: Some(format!(
+            "{} #{} — Property #{}",
+            agreement_label, bid_id, property_id
+        )),
         description: Some(trimmed_description.to_string()),
         media: Some(trimmed_uri.to_string()),
         copies: Some(1),
+        extra: Some(build_document_extra(
+            property_id,
+            bid_id,
+            action_label,
+            false,
+            lease_start,
+            lease_end,
+        )),
         ..Default::default()
     };
 

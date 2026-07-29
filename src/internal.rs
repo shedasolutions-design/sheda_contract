@@ -159,18 +159,35 @@ pub fn burn_nft(contract: &mut ShedaContract, token_id: String) {
 
 pub fn internal_accept_bid(contract: &mut ShedaContract, property_id: u64, bid_id: u64) -> Promise {
     lock_bid(contract, property_id, bid_id);
-    let owner_id = {
+    let (owner_id, has_active_lease) = {
         let property = contract
             .properties
             .get(&property_id)
             .expect("Property does not exist");
-        property.owner_id.clone()
+        (
+            property.owner_id.clone(),
+            property
+                .active_lease
+                .as_ref()
+                .map(|lease| lease.active)
+                .unwrap_or(false),
+        )
     };
 
     assert_eq!(
         owner_id,
         env::predecessor_account_id(),
         "Only the property owner can accept bids"
+    );
+
+    // finalize_accepted_bid() (Purchase and Lease alike) transfers the NFT
+    // from property.owner_id to the bidder. While a lease is active the NFT
+    // is actually held by the tenant, not the owner, so that transfer would
+    // panic there instead of failing cleanly here — after payment has
+    // already gone out on the accept_bid fast path. Reject up front instead.
+    require!(
+        !has_active_lease,
+        "Cannot accept a bid while the property has an active lease"
     );
 
     let now = env::block_timestamp();
@@ -498,18 +515,33 @@ pub fn internal_accept_bid_with_escrow(
     property_id: u64,
     bid_id: u64,
 ) -> bool {
-    let (owner_id, lease_duration_months) = {
+    let (owner_id, lease_duration_months, has_active_lease) = {
         let property = contract
             .properties
             .get(&property_id)
             .expect("Property does not exist");
-        (property.owner_id.clone(), property.lease_duration_months)
+        (
+            property.owner_id.clone(),
+            property.lease_duration_months,
+            property
+                .active_lease
+                .as_ref()
+                .map(|lease| lease.active)
+                .unwrap_or(false),
+        )
     };
 
     assert_eq!(
         owner_id,
         env::predecessor_account_id(),
         "Only the property owner can accept bids"
+    );
+
+    // See internal_accept_bid for why this has to be rejected here rather
+    // than left to fail later at NFT-transfer time.
+    require!(
+        !has_active_lease,
+        "Cannot accept a bid while the property has an active lease"
     );
 
     let now = env::block_timestamp();

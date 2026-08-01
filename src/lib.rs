@@ -1128,7 +1128,14 @@ mod tests {
     use borsh::BorshDeserialize;
     use std::fs;
 
+    // Local debugging aid for decoding a dumped contract state blob, not a
+    // real assertion. `decoder/state.bin` is not committed (and shouldn't be
+    // — it's a per-environment dump), so this panics on File::open in CI and
+    // took the whole Tests job down with it. Ignored by default; run it
+    // explicitly with `cargo test -- --ignored` after dropping a state.bin in
+    // place.
     #[test]
+    #[ignore = "requires a local decoder/state.bin dump that is not committed"]
     fn test_deserialize_state() {
         let mut f = fs::File::open("decoder/state.bin").unwrap();
         let mut bytes = Vec::new();

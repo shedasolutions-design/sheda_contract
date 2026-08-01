@@ -1,4 +1,9 @@
+use near_workspaces::types::NearToken;
 use serde_json::json;
+
+// mint_property mints an NFT via near-contract-standards, which requires the
+// caller to cover the new token's storage. Excess is refunded by the standard.
+const MINT_DEPOSIT: NearToken = NearToken::from_millinear(100);
 
 /// Regression tests for view methods being callable as *views*.
 ///
@@ -48,6 +53,7 @@ async fn test_view_methods_are_view_callable() -> Result<(), Box<dyn std::error:
             "is_for_sale": true,
             "lease_duration_months": null,
         }))
+        .deposit(MINT_DEPOSIT)
         .transact()
         .await?;
     assert!(
@@ -153,6 +159,7 @@ async fn test_bid_read_paths_agree() -> Result<(), Box<dyn std::error::Error>> {
             "is_for_sale": true,
             "lease_duration_months": null,
         }))
+        .deposit(MINT_DEPOSIT)
         .transact()
         .await?
         .into_result()?;

@@ -5,22 +5,27 @@ use serde_json::json;
 // caller to cover the new token's storage. Excess is refunded by the standard.
 const MINT_DEPOSIT: NearToken = NearToken::from_millinear(100);
 
-/// Regression tests for view methods being callable as *views*.
+/// Regression tests for the read methods in `src/views.rs`.
 ///
 /// near-sdk's codegen appends an `env::state_write` to any `&mut self`
 /// method. `storage_write` is a prohibited host function during a read-only
 /// call, so a `&mut self` signature makes the method panic with
 /// `ProhibitedInView` for every client trying to query it for free — even
-/// though the body only reads.
+/// though the body only reads. Five methods here were `&mut self` despite
+/// performing no mutation at all.
 ///
-/// Five methods in `src/views.rs` were declared `&mut self` despite doing no
-/// mutation at all. `get_bids_by_bidder` was fixed in #3; the remaining four
-/// are fixed alongside these tests.
+/// There are two distinct groups, and they need different assertions:
 ///
-/// Each case below goes through `.view()` (not `.call()`) on purpose — that
-/// is precisely the path that regresses if someone reintroduces `&mut self`.
-/// `.call()` would mask the bug, since a change-method call is allowed to
-/// write state.
+/// - `get_bids_by_bidder` takes an explicit `bidder` argument, so once it is
+///   `&self` it becomes genuinely view-callable. Asserted below via `.view()`,
+///   which is exactly the path that regresses if `&mut self` is reintroduced
+///   (`.call()` would mask it, since a change call may write state).
+///
+/// - The four `get_my_*` methods read `env::signer_account_id()`, which is
+///   itself prohibited in a view context, so they can never be views no
+///   matter the signature. For those, `&self` is still the correct
+///   declaration — they don't mutate — and the assertion is just that they
+///   continue to work as calls.
 #[tokio::test]
 async fn test_view_methods_are_view_callable() -> Result<(), Box<dyn std::error::Error>> {
     let contract_wasm = near_workspaces::compile_project("./").await?;
@@ -78,49 +83,44 @@ async fn test_view_methods_are_view_callable() -> Result<(), Box<dyn std::error:
         "get_bids_by_bidder must return an array from a view call, got: {bids_by_bidder}"
     );
 
-    // ---- signer-based methods. `signer_account_id()` isn't populated in a
-    // ---- view context, so these return empty rather than useful data, but
-    // ---- they must still not panic: a ProhibitedInView here is the exact
-    // ---- regression being guarded against.
-    let my_properties: serde_json::Value = contract
-        .view("get_my_properties")
-        .args_json(json!({}))
-        .await?
-        .json()?;
-    assert!(
-        my_properties.is_array(),
-        "get_my_properties must return an array from a view call, got: {my_properties}"
-    );
-
-    let bids_on_my_property: serde_json::Value = contract
-        .view("get_bids_on_my_property")
-        .args_json(json!({}))
-        .await?
-        .json()?;
-    assert!(
-        bids_on_my_property.is_array(),
-        "get_bids_on_my_property must return an array from a view call, got: {bids_on_my_property}"
-    );
-
-    let my_bids: serde_json::Value = contract
-        .view("get_my_bids")
-        .args_json(json!({}))
-        .await?
-        .json()?;
-    assert!(
-        my_bids.is_array(),
-        "get_my_bids must return an array from a view call, got: {my_bids}"
-    );
-
-    let my_leases: serde_json::Value = contract
-        .view("get_my_leases")
-        .args_json(json!({}))
-        .await?
-        .json()?;
-    assert!(
-        my_leases.is_array(),
-        "get_my_leases must return an array from a view call, got: {my_leases}"
-    );
+    // ---- The four `get_my_*` methods are a different case, and this test
+    // ---- originally asserted the wrong thing about them.
+    //
+    // They call `env::signer_account_id()`, and *that host function is itself
+    // prohibited during a view call* — a sandbox run of the `.view()` variant
+    // fails with:
+    //
+    //     ProhibitedInView { method_name: "signer_account_id" }
+    //
+    // So no signature change can make them view-callable; `&self` vs
+    // `&mut self` is irrelevant to that. Making them `&self` is still correct
+    // (they perform no mutation, so they shouldn't be forcing a state write),
+    // but they remain call-only by construction.
+    //
+    // What's asserted here is therefore that they still *work as calls* after
+    // the signature change — i.e. the fix didn't break the one way they can
+    // legitimately be invoked.
+    //
+    // Worth flagging for API review: because signer is unavailable to views,
+    // these four can never serve as free queries. Clients that want that need
+    // an explicit-account variant, the way get_bids_by_bidder already does.
+    for method in [
+        "get_my_properties",
+        "get_bids_on_my_property",
+        "get_my_bids",
+        "get_my_leases",
+    ] {
+        let outcome = contract
+            .call(method)
+            .args_json(json!({}))
+            .transact()
+            .await?;
+        assert!(
+            outcome.is_success(),
+            "{method} should still succeed as a change-method call: {:#?}",
+            outcome.into_result().unwrap_err()
+        );
+    }
 
     Ok(())
 }

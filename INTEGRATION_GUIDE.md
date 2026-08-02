@@ -30,7 +30,7 @@ The Sheda contract manages:
 
 ### Key Design Principles
 
-1. **Two-path acceptance**: Bids can be accepted immediately (`accept_bid`) OR with escrow staging (`accept_bid_with_escrow`)
+1. **Two-path acceptance**:Bids can be accepted immediately (`accept_bid`) OR with escrow staging (`accept_bid_with_escrow`)
 2. **Document-first**: Property documents are minted post-acceptance, not pre-stored
 3. **Multi-stablecoin**: Contract accepts configurable list of accepted tokens (USDC, USDT, etc.)
 4. **State machine**: Bids progress through defined status transitions with guards

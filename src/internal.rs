@@ -778,17 +778,8 @@ fn finalize_accepted_bid(contract: &mut ShedaContract, property_id: u64, bid_id:
 
     match bid.action {
         Action::Purchase => {
-            let mut updated_property = property.clone();
-            updated_property.sold = Some(crate::models::Sold {
-                property_id,
-                buyer_id: bid.bidder.clone(),
-                amount: bid.amount,
-                previous_owner_id: property.owner_id.clone(),
-                sold_at: env::block_timestamp(),
-            });
-            updated_property.is_for_sale = false;
-            contract.properties.insert(property_id, updated_property);
-
+            // Emit before the handover, while property.owner_id still holds
+            // the seller — transfer_property_ownership overwrites it.
             emit_event(
                 "DealFinalized",
                 DealFinalizedEvent {
@@ -799,6 +790,8 @@ fn finalize_accepted_bid(contract: &mut ShedaContract, property_id: u64, bid_id:
                     lease_duration_nanos: 0,
                 },
             );
+
+            transfer_property_ownership(contract, property_id, &bid.bidder);
         }
         Action::Lease => {
             let mut updated_property = property.clone();
@@ -1357,16 +1350,12 @@ pub fn release_escrow_callback(contract: &mut ShedaContract, property_id: u64, b
                         None,
                     );
 
-                    let mut updated_property = property.clone();
-                    updated_property.sold = Some(crate::models::Sold {
-                        property_id,
-                        buyer_id: bid.bidder.clone(),
-                        amount: bid.amount,
-                        previous_owner_id: property.owner_id.clone(),
-                        sold_at: env::block_timestamp(),
-                    });
-                    updated_property.is_for_sale = false;
-                    contract.properties.insert(property_id, updated_property);
+                    // Keep Property.owner_id and property_per_owner in step
+                    // with the token we just moved — without this the buyer
+                    // holds the NFT but the contract still records the seller
+                    // as owner, which leaves the property unusable by either
+                    // party.
+                    transfer_property_ownership(contract, property_id, &bid.bidder);
                 }
                 Action::Lease => {
                     // The Lease record was already created in
@@ -1617,6 +1606,82 @@ pub fn internal_delist_property(contract: &mut ShedaContract, property_id: u64) 
             actor_id: env::predecessor_account_id(),
         },
     );
+}
+
+/// Hand a property over to its new owner, keeping `Property.owner_id` and the
+/// `property_per_owner` index in step with the NEP-171 token.
+///
+/// The NFT was already being transferred on a completed purchase, but neither
+/// of those two were updated alongside it, so the token said the buyer owned
+/// the property while the contract's own records still said the seller did.
+/// That left a purchased property permanently stuck: the seller couldn't act
+/// on it (`delete_property`/`delist_property` both refuse once `sold` is set)
+/// and the buyer couldn't either (they weren't `owner_id`), and it never
+/// appeared in the buyer's portfolio, since `get_property_by_owner` reads
+/// `property_per_owner`.
+///
+/// The property is left in a clean unlisted state so the new owner can do
+/// whatever they like with it — relist it for sale, put it up for lease, or
+/// transfer it on. `sold` is cleared rather than kept: leaving it set would
+/// re-trip the very guards that froze the property in the first place. The
+/// sale itself is still recorded in the `DealFinalized` event.
+///
+/// Call this immediately after `tokens.internal_transfer`, so the token and
+/// these records can never drift apart again.
+///
+/// Purchases only. A lease deliberately leaves `owner_id` alone — the
+/// landlord stays the owner for the duration, and `internal_expire_lease`
+/// hands the token back when it ends.
+pub fn transfer_property_ownership(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    new_owner: &AccountId,
+) {
+    let mut property = contract
+        .properties
+        .get(&property_id)
+        .expect("Property not found")
+        .clone();
+
+    let previous_owner = property.owner_id.clone();
+    if previous_owner == *new_owner {
+        return;
+    }
+
+    // Drop it from the previous owner's index, removing the key outright when
+    // that was their last property (same cleanup internal_delete_property does).
+    let mut previous_owner_properties = contract
+        .property_per_owner
+        .get(&previous_owner)
+        .cloned()
+        .unwrap_or_default();
+    previous_owner_properties.retain(|id| *id != property_id);
+    if previous_owner_properties.is_empty() {
+        contract.property_per_owner.remove(&previous_owner);
+    } else {
+        contract
+            .property_per_owner
+            .insert(previous_owner.clone(), previous_owner_properties);
+    }
+
+    // Add it to the new owner's index, guarding against a double-push in case
+    // this ever runs twice for the same pair.
+    let mut new_owner_properties = contract
+        .property_per_owner
+        .get(new_owner)
+        .cloned()
+        .unwrap_or_default();
+    if !new_owner_properties.contains(&property_id) {
+        new_owner_properties.push(property_id);
+    }
+    contract
+        .property_per_owner
+        .insert(new_owner.clone(), new_owner_properties);
+
+    property.owner_id = new_owner.clone();
+    property.sold = None;
+    property.is_for_sale = false;
+    contract.properties.insert(property_id, property);
 }
 
 pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) {

@@ -6,9 +6,12 @@ pub mod models;
 pub mod views;
 
 pub mod ext;
-use crate::{events::{BidPlacedEvent, LostBidClaimedEvent, PropertyMintedEvent, emit_event}, models::Sold};
 #[allow(unused_imports)]
 use crate::models::{Bid, BidStatus, ContractError, DisputeStatus, Lease, Property};
+use crate::{
+    events::{emit_event, BidPlacedEvent, LostBidClaimedEvent, PropertyMintedEvent},
+    models::Sold,
+};
 use crate::{internal::*, models::Action};
 
 #[allow(unused_imports)]
@@ -99,7 +102,7 @@ pub struct OldBid {
     pub stablecoin_token: AccountId,
 }
 
-#[derive(BorshDeserialize, BorshSerialize,Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Clone)]
 pub struct OldLease {
     pub id: u64,
     pub property_id: u64,
@@ -1125,7 +1128,14 @@ mod tests {
     use borsh::BorshDeserialize;
     use std::fs;
 
+    // Local debugging aid for decoding a dumped contract state blob, not a
+    // real assertion. `decoder/state.bin` is not committed (and shouldn't be
+    // — it's a per-environment dump), so this panics on File::open in CI and
+    // took the whole Tests job down with it. Ignored by default; run it
+    // explicitly with `cargo test -- --ignored` after dropping a state.bin in
+    // place.
     #[test]
+    #[ignore = "requires a local decoder/state.bin dump that is not committed"]
     fn test_deserialize_state() {
         let mut f = fs::File::open("decoder/state.bin").unwrap();
         let mut bytes = Vec::new();

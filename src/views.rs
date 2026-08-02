@@ -280,12 +280,12 @@ impl ShedaContract {
     }
 
     //NOTE Poperty Owner specific
-    pub fn get_my_properties(&mut self) -> Vec<PropertyView> {
+    pub fn get_my_properties(&self) -> Vec<PropertyView> {
         let caller = env::signer_account_id();
         self.get_property_by_owner(caller)
     }
 
-    pub fn get_bids_on_my_property(&mut self) -> Vec<BidView> {
+    pub fn get_bids_on_my_property(&self) -> Vec<BidView> {
         let caller = env::signer_account_id();
         let properties = self.get_property_by_owner(caller);
         let mut bids = Vec::new();
@@ -353,7 +353,7 @@ impl ShedaContract {
     }
 
     // Get my bids (bids I've made)
-    pub fn get_my_bids(&mut self) -> Vec<BidView> {
+    pub fn get_my_bids(&self) -> Vec<BidView> {
         let caller = env::signer_account_id();
         self.get_bids_by_bidder(caller, 0, DEFAULT_PAGINATION_LIMIT)
     }
@@ -403,7 +403,7 @@ impl ShedaContract {
         leases
     }
 
-    pub fn get_my_leases(&mut self) -> Vec<LeaseView> {
+    pub fn get_my_leases(&self) -> Vec<LeaseView> {
         let caller = env::signer_account_id();
         self.get_leases_by_tenant(caller)
     }

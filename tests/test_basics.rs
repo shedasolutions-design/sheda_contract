@@ -1,4 +1,11 @@
+use near_workspaces::types::NearToken;
 use serde_json::json;
+
+// mint_property mints an NFT via near-contract-standards, which requires the
+// caller to cover the new token's storage ("Must attach 0.00666 NEAR to cover
+// storage"). The exact figure scales with metadata size, so attach a
+// comfortable margin — the standard refunds whatever isn't used.
+const MINT_DEPOSIT: NearToken = NearToken::from_millinear(100);
 
 #[tokio::test]
 async fn test_contract_is_operational() -> Result<(), Box<dyn std::error::Error>> {
@@ -59,6 +66,7 @@ async fn test_basics_on(contract_wasm: &[u8]) -> Result<(), Box<dyn std::error::
             "is_for_sale": true,
             "lease_duration_months": null,
         }))
+        .deposit(MINT_DEPOSIT)
         .transact()
         .await?;
     assert!(

@@ -374,6 +374,55 @@ impl ShedaContract {
         this
     }
 
+    /// Recovery hook for a `bids` map that can no longer be deserialized.
+    ///
+    /// `migrate()` below cannot fix this, and running it makes that obvious:
+    /// it converts bids by iterating `old.bids`, and iterating is exactly the
+    /// operation that panics with "Cannot deserialize element". Attempting it
+    /// against the corrupted state fails with that error before it writes
+    /// anything. It also rebuilds the map under the same `b"b"` prefix, so
+    /// even a successful run would leave the unreadable entries in place.
+    ///
+    /// This takes the other route: never touch the broken entries at all.
+    /// The new map is created under a **different prefix** (`b"B"`), so it
+    /// starts genuinely empty rather than inheriting whatever is sitting
+    /// under `b"b"`. The old entries are orphaned in storage — they cost
+    /// storage but are never read again, and there's no way to delete them
+    /// without deserializing them first.
+    ///
+    /// `keep_property_ids` is an allowlist of properties whose bids are still
+    /// readable and should be carried over. Each is fetched by key, which
+    /// only deserializes that one entry, so passing an id that still panics
+    /// will abort the whole call — determine the list off-chain first with
+    /// `get_bids_for_property` per property and pass only the ones that
+    /// return successfully. Pass an empty list to drop every bid.
+    ///
+    /// This matters because dropping a bid strands whatever it holds in
+    /// escrow: the funds stay in the contract with no record to refund them
+    /// against. Only drop bids you know are dead — e.g. bids against
+    /// properties that were already deleted and burnt.
+    ///
+    /// `bid_counter` is left as-is so new bid ids stay monotonic and can't
+    /// collide with anything still referenced off-chain.
+    #[init(ignore_state)]
+    #[private]
+    pub fn migrate_reset_bids(keep_property_ids: Vec<u64>) -> Self {
+        let mut state: ShedaContract = env::state_read().expect("Contract state does not exist");
+
+        // Swap in a fresh map under a new prefix and take ownership of the
+        // old one. Nothing here iterates it — only the explicitly requested
+        // keys are read.
+        let old_bids = core::mem::replace(&mut state.bids, IterableMap::new(b"B".to_vec()));
+
+        for property_id in keep_property_ids {
+            if let Some(bids) = old_bids.get(&property_id) {
+                state.bids.insert(property_id, bids.clone());
+            }
+        }
+
+        state
+    }
+
     /// Upgrade hook to migrate state from a previous version.
     #[init(ignore_state)]
     #[private]

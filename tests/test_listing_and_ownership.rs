@@ -279,3 +279,100 @@ async fn test_property_per_owner_index_tracks_minter() -> Result<(), Box<dyn std
 async fn test_ownership_transfers_to_buyer_on_purchase() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
+
+/// `migrate_reset_bids` must leave the contract usable, and must not disturb
+/// anything other than the bids map.
+///
+/// It can't be tested against genuinely corrupt state — that's the situation
+/// it exists for, and there's no way to author undeserializable bytes from
+/// here. What this does pin down is the mechanical part: the swap to a new
+/// storage prefix produces a working, empty map rather than something that
+/// panics on next read, counters and properties survive untouched, and normal
+/// operation continues afterwards.
+#[tokio::test]
+async fn test_migrate_reset_bids_leaves_contract_usable() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (_sandbox, contract) = deploy_initialized().await?;
+    let property_id = mint(&contract, "Survivor Property", "1000000", true).await?;
+
+    let counter_before: u64 = contract
+        .view("get_bid_counter")
+        .args_json(json!({}))
+        .await?
+        .json()?;
+
+    let outcome = contract
+        .call("migrate_reset_bids")
+        .args_json(json!({ "keep_property_ids": [] }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        outcome.is_success(),
+        "migrate_reset_bids failed: {:#?}",
+        outcome.clone().into_result().unwrap_err()
+    );
+
+    // The bids map is readable and empty rather than panicking — the whole
+    // point of moving to a fresh prefix.
+    let all_bids: Vec<serde_json::Value> = contract
+        .view("get_all_bids")
+        .args_json(json!({ "from_index": 0, "limit": 50 }))
+        .await?
+        .json()?;
+    assert_eq!(all_bids.len(), 0);
+
+    let property_bids: Vec<serde_json::Value> = contract
+        .view("get_bids_for_property")
+        .args_json(json!({ "property_id": property_id }))
+        .await?
+        .json()?;
+    assert_eq!(property_bids.len(), 0);
+
+    // bid_counter is deliberately preserved so new bid ids stay monotonic.
+    let counter_after: u64 = contract
+        .view("get_bid_counter")
+        .args_json(json!({}))
+        .await?
+        .json()?;
+    assert_eq!(
+        counter_before, counter_after,
+        "bid_counter must be preserved"
+    );
+
+    // Everything outside the bids map is untouched.
+    let property: serde_json::Value = contract
+        .view("get_property_by_id")
+        .args_json(json!({ "property_id": property_id }))
+        .await?
+        .json()?;
+    assert_eq!(property["owner_id"], contract.id().to_string());
+    assert_eq!(property["is_for_sale"], true);
+
+    let owned: Vec<serde_json::Value> = contract
+        .view("get_property_by_owner")
+        .args_json(json!({ "owner_id": contract.id().to_string() }))
+        .await?
+        .json()?;
+    assert_eq!(
+        owned.len(),
+        1,
+        "property_per_owner must survive the migration"
+    );
+
+    // And the contract still takes writes afterwards.
+    contract
+        .call("update_listing")
+        .args_json(json!({
+            "property_id": property_id,
+            "price": "2000000",
+            "is_for_sale": true,
+            "lease_duration_months": null,
+        }))
+        .deposit(ONE_YOCTO)
+        .transact()
+        .await?
+        .into_result()?;
+
+    Ok(())
+}

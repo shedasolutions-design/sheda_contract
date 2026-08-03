@@ -24,6 +24,7 @@ use near_contract_standards::non_fungible_token::{
     NonFungibleToken, Token,
 };
 use near_sdk::{
+    assert_one_yocto,
     borsh::{self, BorshDeserialize, BorshSerialize},
     collections::LazyOption,
     env,
@@ -864,6 +865,57 @@ impl ShedaContract {
         //ensure I own the property
 
         internal_delist_property(self, property_id);
+    }
+
+    /// Put an already-minted property back on the market, or edit its terms.
+    ///
+    /// Until now `is_for_sale` could only ever be set to `true` inside
+    /// `mint_property`, so the only way to list anything was to mint a new
+    /// NFT. That made a resale impossible without minting a second token for
+    /// a property that already exists on-chain. This lets whoever currently
+    /// owns a property list it — for sale or for lease — reusing the token
+    /// they already hold, and doubles as the price/duration editor.
+    ///
+    /// Pass `is_for_sale: false` to take a listing down while keeping the
+    /// updated terms (`delist_property` remains the plain "unlist" call).
+    #[payable]
+    pub fn update_listing(
+        &mut self,
+        property_id: u64,
+        price: U128,
+        is_for_sale: bool,
+        lease_duration_months: Option<u64>,
+    ) {
+        assert_one_yocto();
+
+        let mut property = self
+            .properties
+            .get(&property_id)
+            .expect("Property not found")
+            .clone();
+
+        assert_eq!(
+            property.owner_id,
+            env::predecessor_account_id(),
+            "Only the property owner can update the listing"
+        );
+
+        // An occupied property isn't the owner's to re-offer until the lease
+        // ends — same guard delist/delete already apply.
+        assert!(
+            property.active_lease.is_none(),
+            "Cannot update the listing while the property has an active lease"
+        );
+
+        assert!(
+            !is_for_sale || price.0 > 0,
+            "A listed property must have a price above zero"
+        );
+
+        property.price = price.0;
+        property.is_for_sale = is_for_sale;
+        property.lease_duration_months = lease_duration_months;
+        self.properties.insert(property_id, property);
     }
 
     #[payable]

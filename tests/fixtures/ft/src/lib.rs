@@ -12,20 +12,17 @@
 //! `ft_metadata` must return. The supply is handed to one account at
 //! construction and moved around from there.
 
-// The impl_fungible_token_* macros expand to trait impls written in terms of
-// these types, so they all have to be in scope at the expansion site even
-// though nothing below names them directly.
-use near_contract_standards::fungible_token::core::FungibleTokenCore;
 use near_contract_standards::fungible_token::metadata::{
     FungibleTokenMetadata, FungibleTokenMetadataProvider, FT_METADATA_SPEC,
 };
-use near_contract_standards::fungible_token::resolver::FungibleTokenResolver;
 use near_contract_standards::fungible_token::FungibleToken;
-use near_contract_standards::storage_management::{
-    StorageBalance, StorageBalanceBounds, StorageManagement,
-};
 use near_sdk::json_types::U128;
-use near_sdk::{near, AccountId, NearToken, PanicOnDefault, PromiseOrValue};
+// NearToken is the one thing the impl_fungible_token_* macros need and do not
+// bring in themselves: they import the standards traits they implement, but
+// the near_sdk types appearing in those signatures — storage_withdraw takes an
+// Option<NearToken> — have to already be in scope at the expansion site.
+// Importing the traits as well collides with the macros' own imports.
+use near_sdk::{near, AccountId, NearToken, PanicOnDefault};
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]

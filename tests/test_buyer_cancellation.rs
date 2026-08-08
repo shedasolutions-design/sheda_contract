@@ -1,3 +1,5 @@
+mod common;
+
 use near_workspaces::types::NearToken;
 use serde_json::json;
 
@@ -117,8 +119,179 @@ async fn test_cancel_stages_reject_unknown_bid() -> Result<(), Box<dyn std::erro
 //   wrong caller:
 //     a non-bidder calling either entrypoint fails, even inside the window,
 //     and in particular cannot burn someone else's agreement
+
+// The paths below are now driven for real against an NEP-141 fixture
+// (tests/common/mod.rs), so the escrow movement is asserted on balances
+// rather than described.
+
+/// The buyer's exit at `Accepted`: the bid is cancelled and the money comes
+/// back. This is the stage where the appointment happens, and appointments
+/// fall through for reasons the chain cannot see, so the exit is unconditional
+/// — no window, no seller approval.
 #[tokio::test]
-#[ignore = "needs an NEP-141 fixture to fund a bid; see comment above"]
-async fn test_buyer_cancellation_stages_end_to_end() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_buyer_cancel_accepted_bid_refunds() -> common::TestResult {
+    let worker = near_workspaces::sandbox().await?;
+    let fx = common::setup(&worker).await?;
+
+    let property_id = fx.mint_property(true).await?;
+    let bid_id = fx.place_bid(property_id, true).await?;
+
+    let balance_after_bid = fx.ft_balance(fx.buyer.id()).await?;
+
+    let accept = fx
+        .seller
+        .call(fx.contract.id(), "accept_bid_with_escrow")
+        .args_json(json!({ "bid_id": bid_id, "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        accept.is_success(),
+        "{:#?}",
+        accept.into_result().unwrap_err()
+    );
+    assert_eq!(
+        fx.bid_status(property_id, bid_id).await?.as_deref(),
+        Some("Accepted")
+    );
+
+    let cancel = fx
+        .buyer
+        .call(fx.contract.id(), "buyer_cancel_accepted_bid")
+        .args_json(json!({ "bid_id": bid_id, "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        cancel.is_success(),
+        "{:#?}",
+        cancel.into_result().unwrap_err()
+    );
+
+    assert_eq!(
+        fx.bid_status(property_id, bid_id).await?.as_deref(),
+        Some("Cancelled"),
+    );
+    assert_eq!(
+        fx.ft_balance(fx.buyer.id()).await?,
+        balance_after_bid + common::BID_AMOUNT,
+        "escrow was not returned to the buyer",
+    );
+
+    Ok(())
+}
+
+/// Only the bidder may take their own exit. A cancellation refunds escrow and,
+/// one stage later, burns the seller's agreement — so letting a bystander call
+/// it would hand them both someone else's money movement and a way to destroy
+/// a document they have no claim on.
+#[tokio::test]
+async fn test_only_the_bidder_can_cancel() -> common::TestResult {
+    let worker = near_workspaces::sandbox().await?;
+    let fx = common::setup(&worker).await?;
+
+    let property_id = fx.mint_property(true).await?;
+    let bid_id = fx.place_bid(property_id, true).await?;
+
+    fx.seller
+        .call(fx.contract.id(), "accept_bid_with_escrow")
+        .args_json(json!({ "bid_id": bid_id, "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    // The seller is the most plausible wrong caller: they have a real interest
+    // in the bid, just not the right to withdraw it.
+    let stolen = fx
+        .seller
+        .call(fx.contract.id(), "buyer_cancel_accepted_bid")
+        .args_json(json!({ "bid_id": bid_id, "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        stolen.is_failure(),
+        "a non-bidder cancelled someone else's bid",
+    );
+    assert_eq!(
+        fx.bid_status(property_id, bid_id).await?.as_deref(),
+        Some("Accepted"),
+        "the failed call still moved the bid",
+    );
+
+    Ok(())
+}
+
+/// Escrow cannot be stranded by deleting the property out from under it.
+///
+/// This is the guard from the first half of this PR, and until now it had no
+/// automated coverage at all — only a manual checklist.
+#[tokio::test]
+async fn test_delete_blocked_while_a_bid_holds_escrow() -> common::TestResult {
+    let worker = near_workspaces::sandbox().await?;
+    let fx = common::setup(&worker).await?;
+
+    let property_id = fx.mint_property(true).await?;
+    let bid_id = fx.place_bid(property_id, true).await?;
+
+    let active = fx
+        .contract
+        .view("get_active_bids_for_property")
+        .args_json(json!({ "property_id": property_id }))
+        .await?
+        .json::<Vec<serde_json::Value>>()?;
+    assert_eq!(active.len(), 1, "the pending bid should read as blocking");
+
+    let blocked = fx
+        .seller
+        .call(fx.contract.id(), "delete_property")
+        .args_json(json!({ "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        blocked.is_failure(),
+        "a property was deleted while a bid still held escrow against it",
+    );
+
+    // The error has to name the blocking bid — "cannot delete" alone leaves
+    // the owner with no idea what to resolve.
+    let message = format!("{:?}", blocked.into_result().unwrap_err());
+    assert!(
+        message.contains(&format!("bid #{}", bid_id)) && message.contains(fx.buyer.id().as_str()),
+        "the panic did not identify the blocking bid: {message}",
+    );
+
+    // Once the bid is gone the same delete succeeds, so the guard is releasing
+    // properly rather than wedging the property permanently.
+    fx.buyer
+        .call(fx.contract.id(), "cancel_bid")
+        .args_json(json!({ "bid_id": bid_id, "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let allowed = fx
+        .seller
+        .call(fx.contract.id(), "delete_property")
+        .args_json(json!({ "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        allowed.is_success(),
+        "delete still blocked after the bid was cancelled: {:#?}",
+        allowed.into_result().unwrap_err(),
+    );
+
     Ok(())
 }

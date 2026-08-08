@@ -186,3 +186,20 @@ pub fn emit_event<T: Serialize>(event_type: &str, event: T) {
         near_sdk::serde_json::to_string(&event).unwrap_or_default()
     );
 }
+
+/// Emitted when an admin settles a bid that was stuck in `Disputed`.
+///
+/// Raising a dispute freezes the buyer's escrow, so how it was released — and
+/// to whom — is the part anyone auditing the deal afterwards needs.
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "near_sdk::serde")]
+pub struct BidDisputeResolvedEvent {
+    pub token_id: u64,
+    pub bid_id: u64,
+    pub admin_id: AccountId,
+    pub resolution: String,
+    pub buyer_id: AccountId,
+    pub seller_id: AccountId,
+    pub buyer_refund: u128,
+    pub seller_payout: u128,
+}

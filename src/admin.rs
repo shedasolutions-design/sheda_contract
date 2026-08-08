@@ -625,6 +625,40 @@ impl ShedaContract {
         crate::internal::burn_nft(self, property_id.to_string());
     }
 
+    /// Settle a bid frozen in `Disputed`.
+    ///
+    /// `raise_transaction_dispute` could put a bid into `Disputed`, but nothing
+    /// could take it out again — the buyer's escrow stayed in the contract
+    /// permanently, and since a disputed bid still holds a claim on its
+    /// property, the property couldn't be deleted or delisted either. Both
+    /// sides were stuck with no route out.
+    ///
+    /// `SellerWins` deliberately pays no one here: it returns the bid to
+    /// `DocsConfirmed` so the deal completes through the normal release path,
+    /// which already knows how to transfer ownership on a purchase and open
+    /// the lease on a rental.
+    #[payable]
+    pub fn admin_resolve_bid_dispute(
+        &mut self,
+        property_id: u64,
+        bid_id: u64,
+        resolution: DisputeResolution,
+    ) -> Option<Promise> {
+        self.assert_admin();
+        crate::internal::internal_admin_resolve_bid_dispute(self, property_id, bid_id, resolution)
+    }
+
+    /// Bids currently frozen in `Disputed`, so admins can find what needs
+    /// settling without scanning every property.
+    pub fn get_disputed_bids(&self) -> Vec<crate::views::BidView> {
+        self.bids
+            .iter()
+            .flat_map(|(_property_id, bids)| bids.iter())
+            .filter(|bid| bid.status == BidStatus::Disputed)
+            .map(|bid| bid.into())
+            .collect()
+    }
+
     #[payable]
     pub fn admin_change_nft_metadata(&mut self, image_url: String, name: String, symbol: String) {
         self.assert_admin();

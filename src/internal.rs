@@ -7,11 +7,12 @@ use near_sdk::{
 use crate::{
     events::{
         emit_event, BidApprovedEvent, BidCancelledByBuyerEvent, BidCancelledEvent,
-        BidRefundedEvent, BidRejectedEvent, DealFinalizedEvent, DisputeRaisedEvent,
-        LeaseExpiredEvent, LeaseRenewedEvent, PropertyDeletedEvent, PropertyDelistedEvent,
+        BidDisputeResolvedEvent, BidRefundedEvent, BidRejectedEvent, DealFinalizedEvent,
+        DisputeRaisedEvent, LeaseExpiredEvent, LeaseRenewedEvent, PropertyDeletedEvent,
+        PropertyDelistedEvent,
     },
     ext::ft_contract,
-    models::{Action, Bid, BidStatus},
+    models::{Action, Bid, BidStatus, DisputeResolution},
     ShedaContract,
 };
 
@@ -2171,4 +2172,147 @@ pub fn internal_expire_lease(contract: &mut ShedaContract, lease_id: u64) {
             escrow_returned: 0,
         },
     );
+}
+
+/// Settle a bid stuck in `Disputed`.
+///
+/// `internal_raise_bid_dispute` freezes a bid, and nothing else in the
+/// contract ever moved one out again — no refund, no payout, no expiry. The
+/// buyer's stablecoins sat in the contract permanently, and because a disputed
+/// bid still holds a claim on its property, the property could not be deleted
+/// or delisted either. Both sides were stuck with no route out at all.
+///
+/// Only `BuyerWins` and `Split` pay anyone here. `SellerWins` puts the bid
+/// back to `DocsConfirmed` so the deal finishes down the ordinary release
+/// path, which is what knows to transfer ownership on a purchase and open the
+/// lease on a rental — logic worth having exactly one copy of.
+pub fn internal_admin_resolve_bid_dispute(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+    resolution: DisputeResolution,
+) -> Option<Promise> {
+    let property = contract
+        .properties
+        .get(&property_id)
+        .cloned()
+        .expect("Property does not exist");
+
+    let bid = contract
+        .bids
+        .get(&property_id)
+        .and_then(|bids| bids.iter().find(|b| b.id == bid_id).cloned())
+        .unwrap_or_else(|| env::panic_str("Bid does not exist"));
+
+    require!(
+        bid.status == BidStatus::Disputed,
+        format!(
+            "Bid #{} is {:?}, not Disputed — there is nothing to resolve",
+            bid_id, bid.status
+        )
+    );
+
+    // The buyer keeps the odd unit on a split: it is their money sitting in
+    // the contract, so rounding should not quietly move in the seller's favour.
+    let (buyer_refund, seller_payout) = match resolution {
+        DisputeResolution::BuyerWins => (bid.amount, 0u128),
+        DisputeResolution::SellerWins => (0u128, 0u128),
+        DisputeResolution::Split => {
+            let seller_half = bid.amount / 2;
+            (bid.amount.saturating_sub(seller_half), seller_half)
+        }
+    };
+
+    if resolution == DisputeResolution::SellerWins {
+        // No transfer: hand the deal back to the normal completion path.
+        if let Some(bids) = contract.bids.get_mut(&property_id) {
+            let _ = update_bid_in_list(bids, bid_id, |b| {
+                b.status = BidStatus::DocsConfirmed;
+                b.updated_at = env::block_timestamp();
+            });
+        }
+
+        log!(
+            "Dispute on bid {} resolved in the seller's favour by admin {}; \
+             returned to DocsConfirmed so escrow release can proceed",
+            bid_id,
+            env::predecessor_account_id()
+        );
+
+        emit_event(
+            "BidDisputeResolved",
+            BidDisputeResolvedEvent {
+                token_id: property_id,
+                bid_id,
+                admin_id: env::predecessor_account_id(),
+                resolution: format!("{:?}", resolution),
+                buyer_id: bid.bidder.clone(),
+                seller_id: property.owner_id.clone(),
+                buyer_refund: 0,
+                seller_payout: 0,
+            },
+        );
+
+        return None;
+    }
+
+    // Both remaining outcomes unwind the deal, so the whole escrow leaves the
+    // contract and the property stays with the seller.
+    let total_out = checked_add_u128(buyer_refund, seller_payout, "dispute settlement");
+    let current_balance = *contract
+        .stable_coin_balances
+        .get(&bid.stablecoin_token)
+        .unwrap_or(&0);
+    contract.stable_coin_balances.insert(
+        bid.stablecoin_token.clone(),
+        checked_sub_u128(current_balance, total_out, "dispute settlement"),
+    );
+
+    let mut promise = ft_contract::ext(bid.stablecoin_token.clone())
+        .with_attached_deposit(NearToken::from_yoctonear(1))
+        .with_static_gas(Gas::from_tgas(30))
+        .ft_transfer(bid.bidder.clone(), U128(buyer_refund));
+
+    if seller_payout > 0 {
+        promise = promise.then(
+            ft_contract::ext(bid.stablecoin_token.clone())
+                .with_attached_deposit(NearToken::from_yoctonear(1))
+                .with_static_gas(Gas::from_tgas(30))
+                .ft_transfer(property.owner_id.clone(), U128(seller_payout)),
+        );
+    }
+
+    if let Some(bids) = contract.bids.get_mut(&property_id) {
+        let _ = update_bid_in_list(bids, bid_id, |b| {
+            b.status = BidStatus::Cancelled;
+            b.updated_at = env::block_timestamp();
+        });
+    }
+
+    log!(
+        "Dispute on bid {} resolved as {:?} by admin {}: {} refunded to {}, {} paid to {}",
+        bid_id,
+        resolution,
+        env::predecessor_account_id(),
+        buyer_refund,
+        bid.bidder,
+        seller_payout,
+        property.owner_id
+    );
+
+    emit_event(
+        "BidDisputeResolved",
+        BidDisputeResolvedEvent {
+            token_id: property_id,
+            bid_id,
+            admin_id: env::predecessor_account_id(),
+            resolution: format!("{:?}", resolution),
+            buyer_id: bid.bidder.clone(),
+            seller_id: property.owner_id.clone(),
+            buyer_refund,
+            seller_payout,
+        },
+    );
+
+    Some(promise)
 }

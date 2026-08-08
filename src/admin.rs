@@ -537,13 +537,12 @@ impl ShedaContract {
 
         assert!(property.sold.is_none(), "Cannot delete a sold property");
 
-        assert!(
-            self.bids
-                .get(&property_id)
-                .map(|bids| !bids.iter().any(|b| b.status == BidStatus::Pending))
-                .unwrap_or(true),
-            "Cannot delete property with active bids"
-        );
+        // Was checking only Pending, so an admin could delete a property out
+        // from under a bid that was Accepted, DocsReleased, DocsConfirmed,
+        // PaymentReleased or Disputed — all of which still hold the bidder's
+        // funds in escrow. Same guard the owner-facing path uses, and it names
+        // the blocking bids rather than just refusing.
+        crate::internal::assert_no_blocking_bids(self, property_id, "deleted");
 
         self.properties.remove(&property_id.clone());
         log!(

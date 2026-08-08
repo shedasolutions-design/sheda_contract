@@ -222,6 +222,47 @@ impl ShedaContract {
             .unwrap_or_default()
     }
 
+    /// Bids on a property that still have a claim on it — anything not in a
+    /// terminal state.
+    ///
+    /// A bid in one of these states is holding the bidder's stablecoins in
+    /// escrow, or is mid-handover. Deleting the property underneath it would
+    /// leave those funds in the contract with nothing left to refund them
+    /// against, so `delete_property` refuses while any exist and clients can
+    /// call this first to show the owner what's in the way.
+    ///
+    /// `Disputed` counts as blocking here, though it is arguably terminal for
+    /// the *bid*: a dispute still has escrow frozen against it and needs the
+    /// property present to resolve. Deleting one would strand exactly the
+    /// funds this guard exists to protect.
+    pub fn get_active_bids_for_property(&self, property_id: u64) -> Vec<BidView> {
+        self.bids
+            .get(&property_id)
+            .map(|bids| {
+                bids.iter()
+                    .filter(|bid| Self::is_bid_blocking(&bid.status))
+                    .map(|bid| bid.into())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether a bid still has a live claim on its property.
+    ///
+    /// Terminal (not blocking): Rejected, Cancelled, Completed — the bidder's
+    /// funds have already been refunded or paid out.
+    pub(crate) fn is_bid_blocking(status: &BidStatus) -> bool {
+        matches!(
+            status,
+            BidStatus::Pending
+                | BidStatus::Accepted
+                | BidStatus::DocsReleased
+                | BidStatus::DocsConfirmed
+                | BidStatus::PaymentReleased
+                | BidStatus::Disputed
+        )
+    }
+
     //paginate list of properties
     pub fn get_properties(&self, from_index: u64, limit: u64) -> Vec<PropertyView> {
         let limit = limit.min(MAX_PAGINATION_LIMIT);

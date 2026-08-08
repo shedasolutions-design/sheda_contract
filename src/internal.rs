@@ -1593,6 +1593,12 @@ pub fn internal_delist_property(contract: &mut ShedaContract, property_id: u64) 
 
     assert!(property.sold.is_none(), "Cannot delist a sold property");
 
+    // Delisting is less destructive than deleting — the property survives —
+    // but it still pulls the listing out from under anyone who has funds in
+    // escrow against it, leaving their bid unresolvable through the normal
+    // flow. Same guard, same reasoning.
+    assert_no_blocking_bids(contract, property_id, "delisted");
+
     // Set the property as not for sale
     property.is_for_sale = false;
 
@@ -1606,6 +1612,54 @@ pub fn internal_delist_property(contract: &mut ShedaContract, property_id: u64) 
             actor_id: env::predecessor_account_id(),
         },
     );
+}
+
+/// Refuse to remove a property while any bid still has a claim on it.
+///
+/// Bids hold the bidder's stablecoins in escrow from the moment they're
+/// placed until they're refunded or paid out. Removing the property they
+/// point at leaves those funds sitting in the contract with nothing left to
+/// settle them against — nobody can accept, reject, cancel or refund a bid on
+/// a property that no longer exists.
+///
+/// The panic message names every blocking bid, its bidder, state and amount,
+/// because "cannot delete" on its own gives the owner nothing to act on. What
+/// they need to know is which bids to resolve first.
+///
+/// `action` is the verb for the message ("deleted" / "delisted").
+pub fn assert_no_blocking_bids(contract: &ShedaContract, property_id: u64, action: &str) {
+    let blocking: Vec<&Bid> = contract
+        .bids
+        .get(&property_id)
+        .map(|bids| {
+            bids.iter()
+                .filter(|bid| ShedaContract::is_bid_blocking(&bid.status))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if blocking.is_empty() {
+        return;
+    }
+
+    let details = blocking
+        .iter()
+        .map(|bid| {
+            format!(
+                "bid #{} by {} ({:?}, {} tokens)",
+                bid.id, bid.bidder, bid.status, bid.amount
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    env::panic_str(&format!(
+        "Cannot {} this property: {} bid(s) still hold funds in escrow against it — {}. \
+         Reject or cancel them first so the bidders are refunded.",
+        action,
+        blocking.len(),
+        details
+    ));
 }
 
 /// Hand a property over to its new owner, keeping `Property.owner_id` and the
@@ -1703,6 +1757,8 @@ pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) 
     );
 
     assert!(property.sold.is_none(), "Cannot delete a sold property");
+
+    assert_no_blocking_bids(contract, property_id, "deleted");
 
     burn_nft(contract, property_id.to_string());
 

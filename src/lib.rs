@@ -44,7 +44,20 @@ const NS_PER_HOUR: u64 = 60 * 60 * 1_000_000_000;
 pub const DEFAULT_PATH_A_CANCELLATION_WINDOW_NS: u64 = NS_PER_HOUR;
 pub const DEFAULT_PATH_B_STAGE1_WINDOW_NS: u64 = 24 * NS_PER_HOUR;
 pub const DEFAULT_PATH_B_STAGE2_WINDOW_NS: u64 = 48 * NS_PER_HOUR;
-pub const DEFAULT_PATH_B_STAGE3_WINDOW_NS: u64 = 24 * NS_PER_HOUR;
+/// 7 days.
+///
+/// This is *not* a lock on the buyer. While a deal is `Accepted` — the stage
+/// that covers appointments — the buyer can cancel and take their escrow back
+/// at any moment, with no waiting period at all. See
+/// `buyer_cancel_accepted_bid`. Appointments happen off-chain and fall through
+/// for all sorts of reasons, and money locked with no way out would leave the
+/// buyer at the seller's mercy.
+///
+/// This timeout exists for the party who *can't* act unilaterally: the seller,
+/// reclaiming their property when it's the buyer who went silent. Kept short
+/// for the one case where it does bind a buyer — after the agreement was
+/// released and the rejection window lapsed — so nobody waits a month.
+pub const DEFAULT_STALLED_DEAL_TIMEOUT_NS: u64 = 7 * 24 * NS_PER_HOUR;
 pub const DEFAULT_DISPUTE_RESOLUTION_TIMELOCK_NS: u64 = 72 * NS_PER_HOUR;
 pub const DEFAULT_LEASE_EARLY_TERMINATION_WINDOW_NS: u64 = 7 * 24 * NS_PER_HOUR;
 
@@ -103,11 +116,20 @@ pub struct ShedaContract {
     /// Window for the buyer to reject the agreement they were sent. Gates
     /// `buyer_reject_documents_and_cancel`.
     pub path_b_stage2_window_ns: u64,
-    /// Unused by any cancellation path. There is deliberately no exit after
-    /// the buyer confirms the agreement — that is the commitment the seller
-    /// relies on when handing the document over. Reserved for the dispute
-    /// phase; it must not be wired up as a third cancellation stage.
-    pub path_b_stage3_window_ns: u64,
+    /// How long a deal may sit in `Accepted` or `DocsReleased` before either
+    /// party can unwind it via `refund_escrow_timeout`.
+    ///
+    /// This occupies the slot the spec called `path_b_stage3_window_ns`, which
+    /// would have been a cancellation window *after* the buyer confirms the
+    /// agreement — precisely the exit that must not exist, since accepting the
+    /// terms is the commitment the seller relies on. Renamed rather than
+    /// removed and re-added: Borsh is positional, so a rename is free while a
+    /// new field would churn the layout again.
+    ///
+    /// Long by design. The `Accepted` stage covers real-world appointments,
+    /// and this is the backstop for a counterparty who has gone silent, not a
+    /// deadline anyone should be racing.
+    pub stalled_deal_timeout_ns: u64,
     pub dispute_resolution_timelock_ns: u64,
     pub lease_early_termination_window_ns: u64,
 
@@ -402,7 +424,7 @@ impl ShedaContract {
             path_a_cancellation_window_ns: DEFAULT_PATH_A_CANCELLATION_WINDOW_NS,
             path_b_stage1_window_ns: DEFAULT_PATH_B_STAGE1_WINDOW_NS,
             path_b_stage2_window_ns: DEFAULT_PATH_B_STAGE2_WINDOW_NS,
-            path_b_stage3_window_ns: DEFAULT_PATH_B_STAGE3_WINDOW_NS,
+            stalled_deal_timeout_ns: DEFAULT_STALLED_DEAL_TIMEOUT_NS,
             dispute_resolution_timelock_ns: DEFAULT_DISPUTE_RESOLUTION_TIMELOCK_NS,
             lease_early_termination_window_ns: DEFAULT_LEASE_EARLY_TERMINATION_WINDOW_NS,
             global_contract_code: None,
@@ -533,7 +555,7 @@ impl ShedaContract {
             path_a_cancellation_window_ns: DEFAULT_PATH_A_CANCELLATION_WINDOW_NS,
             path_b_stage1_window_ns: DEFAULT_PATH_B_STAGE1_WINDOW_NS,
             path_b_stage2_window_ns: DEFAULT_PATH_B_STAGE2_WINDOW_NS,
-            path_b_stage3_window_ns: DEFAULT_PATH_B_STAGE3_WINDOW_NS,
+            stalled_deal_timeout_ns: DEFAULT_STALLED_DEAL_TIMEOUT_NS,
             dispute_resolution_timelock_ns: DEFAULT_DISPUTE_RESOLUTION_TIMELOCK_NS,
             lease_early_termination_window_ns: DEFAULT_LEASE_EARLY_TERMINATION_WINDOW_NS,
             global_contract_code: old.global_contract_code,
@@ -1082,13 +1104,21 @@ impl ShedaContract {
         internal::internal_complete_transaction(self, property_id, bid_id)
     }
 
-    pub fn refund_escrow_timeout(
-        &mut self,
-        bid_id: u64,
-        property_id: u64,
-        timeout_nanos: u64,
-    ) -> near_sdk::Promise {
-        internal::internal_refund_escrow_timeout(self, property_id, bid_id, timeout_nanos)
+    /// Unwind a deal whose counterparty has gone silent, once
+    /// `stalled_deal_timeout_ns` has genuinely elapsed.
+    ///
+    /// This is the backstop behind `buyer_cancel_accepted_bid`: the buyer can
+    /// leave the `Accepted` stage at any time, and this is how the *seller*
+    /// gets their property back when it's the buyer who disappeared.
+    ///
+    /// It used to take `timeout_nanos` from the caller and had no access
+    /// control, so anyone could pass `0` and force-refund any accepted deal —
+    /// including a buyer wanting their money back while keeping the agreement.
+    /// The duration now comes from state and the caller must be a party to the
+    /// deal or an admin.
+    #[payable]
+    pub fn refund_escrow_timeout(&mut self, bid_id: u64, property_id: u64) -> near_sdk::Promise {
+        internal::internal_refund_escrow_timeout(self, property_id, bid_id)
     }
 
     #[payable]

@@ -218,7 +218,7 @@ impl ShedaContract {
         path_a_ns: Option<u64>,
         path_b_stage1_ns: Option<u64>,
         path_b_stage2_ns: Option<u64>,
-        path_b_stage3_ns: Option<u64>,
+        stalled_deal_timeout_ns: Option<u64>,
         dispute_timelock_ns: Option<u64>,
         lease_early_termination_ns: Option<u64>,
     ) {
@@ -247,9 +247,9 @@ impl ShedaContract {
             "path_b_stage2_ns",
         );
         apply(
-            path_b_stage3_ns,
-            &mut self.path_b_stage3_window_ns,
-            "path_b_stage3_ns",
+            stalled_deal_timeout_ns,
+            &mut self.stalled_deal_timeout_ns,
+            "stalled_deal_timeout_ns",
         );
         apply(
             dispute_timelock_ns,

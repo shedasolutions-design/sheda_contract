@@ -553,7 +553,7 @@ fn internal_buyer_cancel_staged(
     property_id: u64,
     bid_id: u64,
     expected_status: BidStatus,
-    window_ns: u64,
+    window_ns: Option<u64>,
     stage: &str,
 ) -> Promise {
     let bid = {
@@ -583,17 +583,30 @@ fn internal_buyer_cancel_staged(
     );
 
     let now = env::block_timestamp();
-    let deadline = checked_add_u64(bid.updated_at, window_ns, "cancellation deadline");
-    require!(
-        now <= deadline,
-        format!(
-            "The window to cancel at the '{}' stage closed {} seconds ago. \
-             The deal can now only be unwound by raising a dispute.",
-            stage,
-            now.saturating_sub(deadline) / 1_000_000_000
-        )
-    );
-    let window_remaining_ns = deadline.saturating_sub(now);
+
+    // `None` means the stage has no deadline. That applies while the deal is
+    // merely `Accepted`: the parties still have to arrange appointments and
+    // meet in the real world, which the contract can't see and which takes as
+    // long as it takes. Putting a clock on it would strand a buyer who simply
+    // couldn't get a viewing booked in time — committed, funds locked, and no
+    // agreement ever coming. Nothing has been handed over at that point, so
+    // there is no seller exposure a deadline would be protecting.
+    let window_remaining_ns = match window_ns {
+        None => u64::MAX,
+        Some(window_ns) => {
+            let deadline = checked_add_u64(bid.updated_at, window_ns, "cancellation deadline");
+            require!(
+                now <= deadline,
+                format!(
+                    "The window to cancel at the '{}' stage closed {} seconds ago. \
+                     The deal can now only be unwound by raising a dispute.",
+                    stage,
+                    now.saturating_sub(deadline) / 1_000_000_000
+                )
+            );
+            deadline.saturating_sub(now)
+        }
+    };
 
     let refund_promise = ft_contract::ext(bid.stablecoin_token.clone())
         .with_attached_deposit(NearToken::from_yoctonear(1))
@@ -684,17 +697,21 @@ pub fn internal_buyer_cancel_accepted_bid(
     property_id: u64,
     bid_id: u64,
 ) -> Promise {
-    // Stage 1 of the escrow flow. `path_a_cancellation_window_ns` is not used
-    // here: path A is the direct, non-escrow acceptance, which settles inside
-    // the same transaction and so never rests in `Accepted` for anyone to
-    // cancel from.
-    let window = contract.path_b_stage1_window_ns;
+    // No deadline, deliberately. This is the stage where the two sides arrange
+    // appointments and go and view the property — real-world scheduling the
+    // contract can't observe and can't hurry. A window here would trap a buyer
+    // who couldn't get a viewing booked in time.
+    //
+    // The seller gives up nothing at this stage, so there's no exposure to
+    // bound. Their protection against a buyer who goes quiet is
+    // `refund_escrow_timeout`, which lets the deal be unwound after a long
+    // silence and frees the property.
     internal_buyer_cancel_staged(
         contract,
         property_id,
         bid_id,
         BidStatus::Accepted,
-        window,
+        None,
         "accepted",
     )
 }
@@ -716,7 +733,10 @@ pub fn internal_buyer_reject_documents_and_cancel(
     property_id: u64,
     bid_id: u64,
 ) -> Promise {
-    let window = contract.path_b_stage2_window_ns;
+    // Bounded, unlike the `Accepted` stage: here the seller *has* handed
+    // something over, so the buyer has to decide within a set period rather
+    // than sit on the agreement indefinitely.
+    let window = Some(contract.path_b_stage2_window_ns);
     internal_buyer_cancel_staged(
         contract,
         property_id,
@@ -1696,11 +1716,27 @@ pub fn internal_complete_transaction(
     true
 }
 
+/// Unwind a deal that has gone silent, once the timeout has genuinely elapsed.
+///
+/// # Previously exploitable
+///
+/// This took `timeout_nanos` from the caller and had no access control at all.
+/// Since the check was `elapsed < timeout_nanos`, passing `0` made it vacuously
+/// true, so **anyone** could force-refund **any** bid sitting in `Accepted` or
+/// `DocsReleased`, at any moment. That allowed:
+///
+/// - griefing a seller by unwinding their accepted deals at will;
+/// - and worse, a buyer calling it themselves at `DocsReleased` to get their
+///   money back *while keeping the agreement NFT* — defeating the burn in
+///   `buyer_reject_documents_and_cancel`, which is the only thing making it
+///   safe for a seller to hand documents over.
+///
+/// The timeout now comes from contract state, and only the two parties to the
+/// deal or an admin may invoke it. Callers no longer pass a duration.
 pub fn internal_refund_escrow_timeout(
     contract: &mut ShedaContract,
     property_id: u64,
     bid_id: u64,
-    timeout_nanos: u64,
 ) -> Promise {
     lock_bid(contract, property_id, bid_id);
     let bid = {
@@ -1713,9 +1749,44 @@ pub fn internal_refund_escrow_timeout(
         _ => env::panic_str("Bid is not in a refundable timeout state"),
     }
 
+    // Either party can unwind a stalled deal — the buyer to free their funds,
+    // the seller to free their property — plus admins for support cases.
+    // Anyone else has no stake in it and no business collapsing it.
+    let caller = env::predecessor_account_id();
+    let property_owner = contract
+        .properties
+        .get(&property_id)
+        .expect("Property does not exist")
+        .owner_id
+        .clone();
+    require!(
+        caller == bid.bidder || caller == property_owner || contract.admins.contains(&caller),
+        "Only the bidder, the property owner or an admin can time out this deal"
+    );
+
+    // From state, not from the caller. The old signature let anyone pass 0 and
+    // skip the wait entirely.
+    let timeout_nanos = contract.stalled_deal_timeout_ns;
     let now = env::block_timestamp();
-    if now.saturating_sub(bid.updated_at) < timeout_nanos {
-        env::panic_str("Timeout threshold not reached");
+    let elapsed = now.saturating_sub(bid.updated_at);
+    require!(
+        elapsed >= timeout_nanos,
+        format!(
+            "This deal can't be timed out yet — {} seconds still to go.",
+            (timeout_nanos - elapsed) / 1_000_000_000
+        )
+    );
+
+    // A timed-out deal at `DocsReleased` means the buyer is walking away while
+    // holding the seller's agreement, so it burns here for the same reason it
+    // burns in `buyer_reject_documents_and_cancel`. Without this, timing out
+    // would be the loophole that route closes.
+    if let Some(document_token_id) = bid.document_token_id.clone() {
+        burn_nft(contract, document_token_id.clone());
+        log!(
+            "Burned agreement {} — deal timed out at DocsReleased",
+            document_token_id
+        );
     }
 
     let promise = ft_contract::ext(bid.stablecoin_token.clone())

@@ -329,7 +329,7 @@ impl ShedaContract {
             self.path_a_cancellation_window_ns,
             self.path_b_stage1_window_ns,
             self.path_b_stage2_window_ns,
-            self.path_b_stage3_window_ns,
+            self.stalled_deal_timeout_ns,
             self.dispute_resolution_timelock_ns,
             self.lease_early_termination_window_ns,
         ]

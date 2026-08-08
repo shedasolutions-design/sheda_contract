@@ -5,11 +5,14 @@ const NS_PER_HOUR: u64 = 60 * 60 * 1_000_000_000;
 
 /// Expected defaults, in the order `get_cancellation_windows` returns them:
 /// path A, path B stages 1-3, dispute timelock, lease early termination.
+/// Slot 3 is the stalled-deal timeout, not a buyer cancellation window. The
+/// buyer's exit while a deal is `Accepted` is unconditional and immediate, so
+/// nothing here should be read as a period the buyer's money is locked for.
 const EXPECTED_DEFAULTS: [u64; 6] = [
     NS_PER_HOUR,
     24 * NS_PER_HOUR,
     48 * NS_PER_HOUR,
-    24 * NS_PER_HOUR,
+    7 * 24 * NS_PER_HOUR,
     72 * NS_PER_HOUR,
     7 * 24 * NS_PER_HOUR,
 ];
@@ -66,7 +69,7 @@ async fn test_set_cancellation_windows_partial_update() -> Result<(), Box<dyn st
             "path_a_ns": 2 * NS_PER_HOUR,
             "path_b_stage1_ns": null,
             "path_b_stage2_ns": null,
-            "path_b_stage3_ns": null,
+            "stalled_deal_timeout_ns": null,
             "dispute_timelock_ns": 96 * NS_PER_HOUR,
             "lease_early_termination_ns": null,
         }))
@@ -114,7 +117,7 @@ async fn test_zero_window_is_rejected() -> Result<(), Box<dyn std::error::Error>
             "path_a_ns": 0,
             "path_b_stage1_ns": null,
             "path_b_stage2_ns": null,
-            "path_b_stage3_ns": null,
+            "stalled_deal_timeout_ns": null,
             "dispute_timelock_ns": null,
             "lease_early_termination_ns": null,
         }))
@@ -159,7 +162,7 @@ async fn test_non_owner_cannot_set_windows() -> Result<(), Box<dyn std::error::E
             "path_a_ns": 5 * NS_PER_HOUR,
             "path_b_stage1_ns": null,
             "path_b_stage2_ns": null,
-            "path_b_stage3_ns": null,
+            "stalled_deal_timeout_ns": null,
             "dispute_timelock_ns": null,
             "lease_early_termination_ns": null,
         }))

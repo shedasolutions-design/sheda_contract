@@ -5,12 +5,31 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# This crate resolves its own dependency graph — it is a separate workspace,
+# so it does not share the parent's Cargo.lock and cannot inherit its pins.
+# Left alone it picks the newest release of every transitive dependency, and
+# several now require a newer compiler than the 1.86.0 this project pins for
+# reproducible builds. It surfaces as a confusing "rustc 1.86.0 is not
+# supported by the following packages" from inside a sandbox test.
+#
+# Resolver v3 honours rust-version when selecting versions, so declaring the
+# MSRV here keeps the graph on releases this toolchain can actually build.
+rust-version = "1.86.0"
+resolver = "3"
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-near-sdk = "5.16"
-near-contract-standards = "5.19.0"
+# Pinned exactly, and matched to the versions in the parent Cargo.lock.
+#
+# This is a separate workspace, so it resolves its own dependency graph from
+# scratch — left open it picks the newest release of everything, and those now
+# require a newer rustc than the 1.86.0 this project is pinned to for
+# reproducible builds. The failure surfaces as an unrelated-looking
+# "rustc 1.86.0 is not supported" during the sandbox test's compile step.
+near-sdk = "=5.24.1"
+near-contract-standards = "=5.24.1"
 
 [profile.release]
 codegen-units = 1

@@ -627,7 +627,7 @@ impl ShedaContract {
 
     /// Settle a bid frozen in `Disputed`.
     ///
-    /// `raise_transaction_dispute` could put a bid into `Disputed`, but nothing
+    /// `raise_dispute` could put a bid into `Disputed`, but nothing
     /// could take it out again — the buyer's escrow stayed in the contract
     /// permanently, and since a disputed bid still holds a claim on its
     /// property, the property couldn't be deleted or delisted either. Both

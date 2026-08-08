@@ -6,7 +6,7 @@ use serde_json::json;
 // A disputed bid used to be a dead end.
 // ---------------------------------------------------------------------------
 //
-// `raise_transaction_dispute` could set a bid to `Disputed`, but nothing in
+// `raise_dispute` could set a bid to `Disputed`, but nothing in
 // the contract ever moved one out again — no refund, no payout, no expiry. The
 // buyer's stablecoins sat in the contract permanently. And because a disputed
 // bid still holds a claim on its property, the seller could not delete or
@@ -33,7 +33,7 @@ async fn disputed_bid(fx: &common::Fixture, property_id: u64) -> common::TestRes
         .into_result()?;
 
     fx.buyer
-        .call(fx.contract.id(), "raise_transaction_dispute")
+        .call(fx.contract.id(), "raise_dispute")
         .args_json(json!({
             "bid_id": bid_id,
             "property_id": property_id,

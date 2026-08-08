@@ -206,6 +206,68 @@ impl ShedaContract {
         self.leases.insert(lease_id, lease);
     }
 
+    /// Tune the buyer-cancellation windows without a redeploy.
+    ///
+    /// Each argument is optional; `None` leaves that window unchanged. A zero
+    /// is rejected rather than stored — a zero-length window would let a buyer
+    /// cancel at any point with no time bound, which is the opposite of what
+    /// these gates are for.
+    #[payable]
+    pub fn set_cancellation_windows(
+        &mut self,
+        path_a_ns: Option<u64>,
+        path_b_stage1_ns: Option<u64>,
+        path_b_stage2_ns: Option<u64>,
+        stalled_deal_timeout_ns: Option<u64>,
+        dispute_timelock_ns: Option<u64>,
+        lease_early_termination_ns: Option<u64>,
+    ) {
+        self.assert_owner();
+
+        let apply = |value: Option<u64>, target: &mut u64, label: &str| {
+            if let Some(v) = value {
+                require!(v > 0, format!("{} must be greater than zero", label));
+                *target = v;
+            }
+        };
+
+        apply(
+            path_a_ns,
+            &mut self.path_a_cancellation_window_ns,
+            "path_a_ns",
+        );
+        apply(
+            path_b_stage1_ns,
+            &mut self.path_b_stage1_window_ns,
+            "path_b_stage1_ns",
+        );
+        apply(
+            path_b_stage2_ns,
+            &mut self.path_b_stage2_window_ns,
+            "path_b_stage2_ns",
+        );
+        apply(
+            stalled_deal_timeout_ns,
+            &mut self.stalled_deal_timeout_ns,
+            "stalled_deal_timeout_ns",
+        );
+        apply(
+            dispute_timelock_ns,
+            &mut self.dispute_resolution_timelock_ns,
+            "dispute_timelock_ns",
+        );
+        apply(
+            lease_early_termination_ns,
+            &mut self.lease_early_termination_window_ns,
+            "lease_early_termination_ns",
+        );
+
+        log!(
+            "Cancellation windows updated by owner {}",
+            env::signer_account_id()
+        );
+    }
+
     #[payable]
     pub fn set_oracle_account(&mut self, oracle_account: AccountId) {
         self.assert_owner();
@@ -537,13 +599,12 @@ impl ShedaContract {
 
         assert!(property.sold.is_none(), "Cannot delete a sold property");
 
-        assert!(
-            self.bids
-                .get(&property_id)
-                .map(|bids| !bids.iter().any(|b| b.status == BidStatus::Pending))
-                .unwrap_or(true),
-            "Cannot delete property with active bids"
-        );
+        // Was checking only Pending, so an admin could delete a property out
+        // from under a bid that was Accepted, DocsReleased, DocsConfirmed,
+        // PaymentReleased or Disputed — all of which still hold the bidder's
+        // funds in escrow. Same guard the owner-facing path uses, and it names
+        // the blocking bids rather than just refusing.
+        crate::internal::assert_no_blocking_bids(self, property_id, "deleted");
 
         self.properties.remove(&property_id.clone());
         log!(

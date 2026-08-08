@@ -29,7 +29,7 @@ use near_sdk::{
     collections::LazyOption,
     env,
     json_types::{Base64VecU8, U128},
-    near, require,
+    log, near, require,
     store::{IterableMap, IterableSet},
     AccountId, Gas, NearToken, PanicOnDefault, Promise,
 };
@@ -37,6 +37,38 @@ use near_sdk::{
 pub use crate::ext::*;
 
 pub type TokenId = String;
+
+const NS_PER_HOUR: u64 = 60 * 60 * 1_000_000_000;
+
+/// Defaults for the buyer-cancellation windows.
+pub const DEFAULT_PATH_A_CANCELLATION_WINDOW_NS: u64 = NS_PER_HOUR;
+pub const DEFAULT_PATH_B_STAGE1_WINDOW_NS: u64 = 24 * NS_PER_HOUR;
+pub const DEFAULT_PATH_B_STAGE2_WINDOW_NS: u64 = 48 * NS_PER_HOUR;
+/// 7 days.
+///
+/// This is *not* a lock on the buyer. While a deal is `Accepted` — the stage
+/// that covers appointments — the buyer can cancel and take their escrow back
+/// at any moment, with no waiting period at all. See
+/// `buyer_cancel_accepted_bid`. Appointments happen off-chain and fall through
+/// for all sorts of reasons, and money locked with no way out would leave the
+/// buyer at the seller's mercy.
+///
+/// This timeout exists for the party who *can't* act unilaterally: the seller,
+/// reclaiming their property when it's the buyer who went silent. Kept short
+/// for the one case where it does bind a buyer — after the agreement was
+/// released and the rejection window lapsed — so nobody waits a month.
+pub const DEFAULT_STALLED_DEAL_TIMEOUT_NS: u64 = 7 * 24 * NS_PER_HOUR;
+pub const DEFAULT_DISPUTE_RESOLUTION_TIMELOCK_NS: u64 = 72 * NS_PER_HOUR;
+pub const DEFAULT_LEASE_EARLY_TERMINATION_WINDOW_NS: u64 = 7 * 24 * NS_PER_HOUR;
+
+/// Storage prefix for the bids map rebuilt by the v4 migration.
+///
+/// Deliberately *not* the original `b"b"`. `IterableMap` keeps its entries in
+/// separate storage keys under its prefix, so reusing `b"b"` would leave the
+/// undeserializable v2-era entries sitting at the exact keys the fresh map
+/// writes to — a new map with a stale backing store, which is how this state
+/// got corrupted in the first place. A new prefix guarantees a clean slate.
+const BIDS_V4_PREFIX: &[u8] = b"b4";
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
@@ -68,6 +100,38 @@ pub struct ShedaContract {
     pub bid_expiry_ns: u64,
     pub escrow_release_delay_ns: u64,
     pub lost_bid_claim_delay_ns: u64,
+
+    // Buyer-cancellation windows. How long a buyer has to walk away at each
+    // stage of a deal, and how long an admin has to settle a contested one.
+    // Configurable via `set_cancellation_windows` so they can be tuned without
+    // a redeploy.
+    //
+    /// Unused. Path A is the direct, non-escrow acceptance, which settles in
+    /// the same transaction and never rests in a cancellable state. Kept
+    /// because removing a field would churn the Borsh layout again for nothing.
+    pub path_a_cancellation_window_ns: u64,
+    /// Window to cancel a bid the seller accepted, before any agreement is
+    /// sent. Gates `buyer_cancel_accepted_bid`.
+    pub path_b_stage1_window_ns: u64,
+    /// Window for the buyer to reject the agreement they were sent. Gates
+    /// `buyer_reject_documents_and_cancel`.
+    pub path_b_stage2_window_ns: u64,
+    /// How long a deal may sit in `Accepted` or `DocsReleased` before either
+    /// party can unwind it via `refund_escrow_timeout`.
+    ///
+    /// This occupies the slot the spec called `path_b_stage3_window_ns`, which
+    /// would have been a cancellation window *after* the buyer confirms the
+    /// agreement — precisely the exit that must not exist, since accepting the
+    /// terms is the commitment the seller relies on. Renamed rather than
+    /// removed and re-added: Borsh is positional, so a rename is free while a
+    /// new field would churn the layout again.
+    ///
+    /// Long by design. The `Accepted` stage covers real-world appointments,
+    /// and this is the backstop for a counterparty who has gone silent, not a
+    /// deadline anyone should be racing.
+    pub stalled_deal_timeout_ns: u64,
+    pub dispute_resolution_timelock_ns: u64,
+    pub lease_early_termination_window_ns: u64,
 
     // Global contract factory
     pub global_contract_code: Option<Vec<u8>>,
@@ -357,6 +421,12 @@ impl ShedaContract {
             bid_expiry_ns: 7 * 24 * 60 * 60 * 1_000_000_000,
             escrow_release_delay_ns: 24 * 60 * 60 * 1_000_000_000,
             lost_bid_claim_delay_ns: 24 * 60 * 60 * 1_000_000_000,
+            path_a_cancellation_window_ns: DEFAULT_PATH_A_CANCELLATION_WINDOW_NS,
+            path_b_stage1_window_ns: DEFAULT_PATH_B_STAGE1_WINDOW_NS,
+            path_b_stage2_window_ns: DEFAULT_PATH_B_STAGE2_WINDOW_NS,
+            stalled_deal_timeout_ns: DEFAULT_STALLED_DEAL_TIMEOUT_NS,
+            dispute_resolution_timelock_ns: DEFAULT_DISPUTE_RESOLUTION_TIMELOCK_NS,
+            lease_early_termination_window_ns: DEFAULT_LEASE_EARLY_TERMINATION_WINDOW_NS,
             global_contract_code: None,
             property_instances: IterableMap::new(b"pi".to_vec()),
             oracle_account_id: Some(owner_id.clone()),
@@ -364,7 +434,7 @@ impl ShedaContract {
             upgrade_delay_ns: 0,
             pending_upgrade_code: None,
             pending_upgrade_at: None,
-            version: 3,
+            version: 4,
         };
         this.admins.insert(owner_id);
         for stablecoin in supported_stablecoins {
@@ -374,17 +444,44 @@ impl ShedaContract {
         this
     }
 
-    /// Upgrade hook to migrate state from a previous version.
+    /// Upgrade hook to migrate state to v4.
+    ///
+    /// v4 adds the buyer-cancellation window fields and starts the bids map
+    /// clean under a new storage prefix.
+    ///
+    /// # Why bids reset instead of carrying over
+    ///
+    /// The previous `migrate()` could never run. It iterated `old.bids`, and
+    /// `IterableMap::iter()` deserializes each value eagerly — so it panicked
+    /// with `Cannot deserialize element` on the first record written before
+    /// `Bid` gained `document_image_uri`/`document_description`. Borsh is
+    /// positional, so those bytes can't be read as the current `Bid`. The
+    /// migration meant to repair the corruption was blocked by the corruption.
+    ///
+    /// Any migration that tries to preserve those records has to decide, per
+    /// entry, whether it is readable — and guessing wrong destroys live bids
+    /// and the escrow behind them. On testnet, where the existing records are
+    /// already written off, that risk buys nothing. So this reads none of them:
+    /// it never touches `old.bids` at all, which is the only approach that
+    /// cannot hit the panic. Bidders re-bid against a contract that works.
+    ///
+    /// # This abandons escrow
+    ///
+    /// Dropped bids leave their stablecoins in the contract with no record to
+    /// refund against. `stable_coin_balances` still counts them, so the owner
+    /// can recover them via `emergency_withdraw`, but bidders can't be paid out
+    /// through the normal path. Reconcile those balances after migrating.
     #[init(ignore_state)]
     #[private]
     pub fn migrate() -> Self {
-        // Read old state as a temporary struct containing OldBid entries
+        // Mirrors the v3 layout exactly: current `Bid`, and none of the
+        // cancellation-window fields v4 introduces.
         #[derive(BorshDeserialize)]
-        struct OldStateV2 {
+        struct OldStateV3 {
             pub tokens: NonFungibleToken,
             pub metadata: LazyOption<NFTContractMetadata>,
             pub properties: IterableMap<u64, Property>,
-            pub bids: IterableMap<u64, Vec<OldBid>>,
+            pub bids: IterableMap<u64, Vec<Bid>>,
             pub leases: IterableMap<u64, Lease>,
             pub property_counter: u64,
             pub bid_counter: u64,
@@ -410,40 +507,14 @@ impl ShedaContract {
             pub version: u32,
         }
 
-        let old: OldStateV2 = env::state_read().expect("Old state does not exist");
+        let old: OldStateV3 = env::state_read().expect("Old state does not exist");
 
-        // Transform OldBid entries to new Bid with document fields
-        let mut migrated_bids = IterableMap::new(b"b".to_vec());
-        for (property_id, old_bids) in old.bids.iter() {
-            let new_bids: Vec<Bid> = old_bids
-                .iter()
-                .map(|old_bid| Bid {
-                    id: old_bid.id,
-                    bidder: old_bid.bidder.clone(),
-                    property_id: old_bid.property_id,
-                    amount: old_bid.amount,
-                    created_at: old_bid.created_at,
-                    updated_at: old_bid.updated_at,
-                    status: old_bid.status.clone(),
-                    document_token_id: old_bid.document_token_id.clone(),
-                    document_image_uri: None,
-                    document_description: None,
-                    escrow_release_tx: old_bid.escrow_release_tx.clone(),
-                    dispute_reason: old_bid.dispute_reason.clone(),
-                    expires_at: old_bid.expires_at,
-                    escrow_release_after: old_bid.escrow_release_after,
-                    action: old_bid.action.clone(),
-                    stablecoin_token: old_bid.stablecoin_token.clone(),
-                    // Pre-upgrade bids never tracked this; a bid already
-                    // tied to a lease before this migration just falls back
-                    // to the client's estimate path instead of the precise
-                    // get_lease_by_id lookup — no regression, just no gain
-                    // for that narrow pre-existing set.
-                    lease_id: None,
-                })
-                .collect();
-            migrated_bids.insert(*property_id, new_bids);
-        }
+        // `old.bids` is never read — not iterated, not cleared. Reading it is
+        // the operation that panics, and `IterableMap::clear()` walks entries
+        // to drop them, so even discarding it properly would hit the same
+        // failure. It stays in storage, unreferenced, at the old prefix.
+        let migrated_bids = IterableMap::new(BIDS_V4_PREFIX.to_vec());
+        log!("migrate v4: bids reset under a new storage prefix");
 
         let mut bid_expiry_ns = old.bid_expiry_ns;
         if bid_expiry_ns == 0 {
@@ -480,6 +551,13 @@ impl ShedaContract {
             bid_expiry_ns,
             escrow_release_delay_ns,
             lost_bid_claim_delay_ns,
+            // New in v4 — no prior value to carry over.
+            path_a_cancellation_window_ns: DEFAULT_PATH_A_CANCELLATION_WINDOW_NS,
+            path_b_stage1_window_ns: DEFAULT_PATH_B_STAGE1_WINDOW_NS,
+            path_b_stage2_window_ns: DEFAULT_PATH_B_STAGE2_WINDOW_NS,
+            stalled_deal_timeout_ns: DEFAULT_STALLED_DEAL_TIMEOUT_NS,
+            dispute_resolution_timelock_ns: DEFAULT_DISPUTE_RESOLUTION_TIMELOCK_NS,
+            lease_early_termination_window_ns: DEFAULT_LEASE_EARLY_TERMINATION_WINDOW_NS,
             global_contract_code: old.global_contract_code,
             property_instances: old.property_instances,
             oracle_account_id: old.oracle_account_id,
@@ -487,7 +565,7 @@ impl ShedaContract {
             upgrade_delay_ns: old.upgrade_delay_ns,
             pending_upgrade_code: old.pending_upgrade_code,
             pending_upgrade_at: old.pending_upgrade_at,
-            version: 3,
+            version: 4,
         }
     }
 
@@ -860,6 +938,47 @@ impl ShedaContract {
         internal_cancel_bid(self, property_id, bid_id)
     }
 
+    /// Cancel a bid the seller accepted but hasn't sent the agreement for.
+    ///
+    /// `cancel_bid` only covers a `Pending` bid. Once a bid was accepted the
+    /// buyer had no way out at all, so a deal that stalled left their funds in
+    /// escrow indefinitely with only an admin refund to fall back on.
+    ///
+    /// Nothing has been handed over at this stage, so this is a clean exit:
+    /// full refund, and the property goes back on the market.
+    ///
+    /// Windows are configurable via `set_cancellation_windows`.
+    #[payable]
+    pub fn buyer_cancel_accepted_bid(
+        &mut self,
+        bid_id: u64,
+        property_id: u64,
+    ) -> near_sdk::Promise {
+        internal::internal_buyer_cancel_accepted_bid(self, property_id, bid_id)
+    }
+
+    /// Reject the agreement the seller sent, and cancel the deal.
+    ///
+    /// The agreement is the real-world contract the two sides settled on after
+    /// their appointments, minted to the buyer as an NFT. If the buyer won't
+    /// accept those terms, this burns the agreement and returns their escrow.
+    ///
+    /// The burn is the point: a buyer who walks away must not keep the terms
+    /// the seller handed over. That's what makes releasing the document safe
+    /// for the seller.
+    ///
+    /// Confirming the agreement instead (`confirm_document_receipt`) is the
+    /// commitment — see the note on that method. There is deliberately no
+    /// cancellation entrypoint past it.
+    #[payable]
+    pub fn buyer_reject_documents_and_cancel(
+        &mut self,
+        bid_id: u64,
+        property_id: u64,
+    ) -> near_sdk::Promise {
+        internal::internal_buyer_reject_documents_and_cancel(self, property_id, bid_id)
+    }
+
     #[payable]
     pub fn delist_property(&mut self, property_id: u64) {
         //ensure I own the property
@@ -955,6 +1074,19 @@ impl ShedaContract {
         )
     }
 
+    /// Accept the agreement the seller sent. **This is the point of no
+    /// return.**
+    ///
+    /// The buyer has reviewed the real-world terms and is agreeing to them.
+    /// After this there is no cancellation entrypoint — only releasing payment
+    /// or raising a dispute. That asymmetry is deliberate and load-bearing: the
+    /// seller hands over a signed agreement on the understanding that accepting
+    /// it commits the buyer, so an exit here would let a buyer take the terms
+    /// and walk.
+    ///
+    /// A buyer who does not want to proceed must call
+    /// `buyer_reject_documents_and_cancel` instead, which burns the agreement
+    /// and refunds them.
     pub fn confirm_document_receipt(&mut self, bid_id: u64, property_id: u64) -> bool {
         internal::internal_confirm_document_receipt(self, property_id, bid_id)
     }
@@ -972,13 +1104,21 @@ impl ShedaContract {
         internal::internal_complete_transaction(self, property_id, bid_id)
     }
 
-    pub fn refund_escrow_timeout(
-        &mut self,
-        bid_id: u64,
-        property_id: u64,
-        timeout_nanos: u64,
-    ) -> near_sdk::Promise {
-        internal::internal_refund_escrow_timeout(self, property_id, bid_id, timeout_nanos)
+    /// Unwind a deal whose counterparty has gone silent, once
+    /// `stalled_deal_timeout_ns` has genuinely elapsed.
+    ///
+    /// This is the backstop behind `buyer_cancel_accepted_bid`: the buyer can
+    /// leave the `Accepted` stage at any time, and this is how the *seller*
+    /// gets their property back when it's the buyer who disappeared.
+    ///
+    /// It used to take `timeout_nanos` from the caller and had no access
+    /// control, so anyone could pass `0` and force-refund any accepted deal —
+    /// including a buyer wanting their money back while keeping the agreement.
+    /// The duration now comes from state and the caller must be a party to the
+    /// deal or an admin.
+    #[payable]
+    pub fn refund_escrow_timeout(&mut self, bid_id: u64, property_id: u64) -> near_sdk::Promise {
+        internal::internal_refund_escrow_timeout(self, property_id, bid_id)
     }
 
     #[payable]

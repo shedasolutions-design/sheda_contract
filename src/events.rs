@@ -49,6 +49,26 @@ pub struct BidCancelledEvent {
     pub amount: u128,
 }
 
+/// Event emitted when a buyer walks away from a deal that was already under
+/// way, at one of the time-gated stages after acceptance.
+///
+/// Distinct from `BidCancelled`, which only covers a bid the seller had not
+/// acted on yet. This one means an agreed deal was unwound, so indexers and
+/// the seller's activity feed need to tell the two apart.
+#[derive(Serialize, Deserialize)]
+pub struct BidCancelledByBuyerEvent {
+    pub token_id: u64,
+    pub bid_id: u64,
+    pub bidder_id: AccountId,
+    pub amount: u128,
+    /// Which cancellation gate was used, e.g. "accepted", "docs_released".
+    pub stage: String,
+    /// Bid status immediately before the cancellation.
+    pub previous_status: String,
+    /// Nanoseconds remaining in the window when the buyer cancelled.
+    pub window_remaining_ns: u64,
+}
+
 /// Event emitted when a bid is refunded
 #[derive(Serialize, Deserialize)]
 pub struct BidRefundedEvent {

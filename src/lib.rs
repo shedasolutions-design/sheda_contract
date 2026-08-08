@@ -29,7 +29,7 @@ use near_sdk::{
     collections::LazyOption,
     env,
     json_types::{Base64VecU8, U128},
-    near, require,
+    log, near, require,
     store::{IterableMap, IterableSet},
     AccountId, Gas, NearToken, PanicOnDefault, Promise,
 };
@@ -38,8 +38,6 @@ pub use crate::ext::*;
 
 pub type TokenId = String;
 
-#[near(contract_state)]
-#[derive(PanicOnDefault)]
 const NS_PER_HOUR: u64 = 60 * 60 * 1_000_000_000;
 
 /// Defaults for the buyer-cancellation windows.
@@ -59,6 +57,8 @@ pub const DEFAULT_LEASE_EARLY_TERMINATION_WINDOW_NS: u64 = 7 * 24 * NS_PER_HOUR;
 /// got corrupted in the first place. A new prefix guarantees a clean slate.
 const BIDS_V4_PREFIX: &[u8] = b"b4";
 
+#[near(contract_state)]
+#[derive(PanicOnDefault)]
 pub struct ShedaContract {
     pub tokens: NonFungibleToken,
     pub metadata: LazyOption<NFTContractMetadata>,

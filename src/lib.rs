@@ -91,11 +91,22 @@ pub struct ShedaContract {
     // Buyer-cancellation windows. How long a buyer has to walk away at each
     // stage of a deal, and how long an admin has to settle a contested one.
     // Configurable via `set_cancellation_windows` so they can be tuned without
-    // a redeploy. A zero value means "unset" and callers fall back to the
-    // defaults in `default_cancellation_windows`.
+    // a redeploy.
+    //
+    /// Unused. Path A is the direct, non-escrow acceptance, which settles in
+    /// the same transaction and never rests in a cancellable state. Kept
+    /// because removing a field would churn the Borsh layout again for nothing.
     pub path_a_cancellation_window_ns: u64,
+    /// Window to cancel a bid the seller accepted, before any agreement is
+    /// sent. Gates `buyer_cancel_accepted_bid`.
     pub path_b_stage1_window_ns: u64,
+    /// Window for the buyer to reject the agreement they were sent. Gates
+    /// `buyer_reject_documents_and_cancel`.
     pub path_b_stage2_window_ns: u64,
+    /// Unused by any cancellation path. There is deliberately no exit after
+    /// the buyer confirms the agreement — that is the commitment the seller
+    /// relies on when handing the document over. Reserved for the dispute
+    /// phase; it must not be wired up as a third cancellation stage.
     pub path_b_stage3_window_ns: u64,
     pub dispute_resolution_timelock_ns: u64,
     pub lease_early_termination_window_ns: u64,
@@ -905,6 +916,47 @@ impl ShedaContract {
         internal_cancel_bid(self, property_id, bid_id)
     }
 
+    /// Cancel a bid the seller accepted but hasn't sent the agreement for.
+    ///
+    /// `cancel_bid` only covers a `Pending` bid. Once a bid was accepted the
+    /// buyer had no way out at all, so a deal that stalled left their funds in
+    /// escrow indefinitely with only an admin refund to fall back on.
+    ///
+    /// Nothing has been handed over at this stage, so this is a clean exit:
+    /// full refund, and the property goes back on the market.
+    ///
+    /// Windows are configurable via `set_cancellation_windows`.
+    #[payable]
+    pub fn buyer_cancel_accepted_bid(
+        &mut self,
+        bid_id: u64,
+        property_id: u64,
+    ) -> near_sdk::Promise {
+        internal::internal_buyer_cancel_accepted_bid(self, property_id, bid_id)
+    }
+
+    /// Reject the agreement the seller sent, and cancel the deal.
+    ///
+    /// The agreement is the real-world contract the two sides settled on after
+    /// their appointments, minted to the buyer as an NFT. If the buyer won't
+    /// accept those terms, this burns the agreement and returns their escrow.
+    ///
+    /// The burn is the point: a buyer who walks away must not keep the terms
+    /// the seller handed over. That's what makes releasing the document safe
+    /// for the seller.
+    ///
+    /// Confirming the agreement instead (`confirm_document_receipt`) is the
+    /// commitment — see the note on that method. There is deliberately no
+    /// cancellation entrypoint past it.
+    #[payable]
+    pub fn buyer_reject_documents_and_cancel(
+        &mut self,
+        bid_id: u64,
+        property_id: u64,
+    ) -> near_sdk::Promise {
+        internal::internal_buyer_reject_documents_and_cancel(self, property_id, bid_id)
+    }
+
     #[payable]
     pub fn delist_property(&mut self, property_id: u64) {
         //ensure I own the property
@@ -1000,6 +1052,19 @@ impl ShedaContract {
         )
     }
 
+    /// Accept the agreement the seller sent. **This is the point of no
+    /// return.**
+    ///
+    /// The buyer has reviewed the real-world terms and is agreeing to them.
+    /// After this there is no cancellation entrypoint — only releasing payment
+    /// or raising a dispute. That asymmetry is deliberate and load-bearing: the
+    /// seller hands over a signed agreement on the understanding that accepting
+    /// it commits the buyer, so an exit here would let a buyer take the terms
+    /// and walk.
+    ///
+    /// A buyer who does not want to proceed must call
+    /// `buyer_reject_documents_and_cancel` instead, which burns the agreement
+    /// and refunds them.
     pub fn confirm_document_receipt(&mut self, bid_id: u64, property_id: u64) -> bool {
         internal::internal_confirm_document_receipt(self, property_id, bid_id)
     }

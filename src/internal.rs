@@ -6,9 +6,9 @@ use near_sdk::{
 
 use crate::{
     events::{
-        emit_event, BidApprovedEvent, BidCancelledEvent, BidRefundedEvent, BidRejectedEvent,
-        DealFinalizedEvent, DisputeRaisedEvent, LeaseExpiredEvent, LeaseRenewedEvent,
-        PropertyDeletedEvent, PropertyDelistedEvent,
+        emit_event, BidApprovedEvent, BidCancelledByBuyerEvent, BidCancelledEvent,
+        BidRefundedEvent, BidRejectedEvent, DealFinalizedEvent, DisputeRaisedEvent,
+        LeaseExpiredEvent, LeaseRenewedEvent, PropertyDeletedEvent, PropertyDelistedEvent,
     },
     ext::ft_contract,
     models::{Action, Bid, BidStatus},
@@ -507,6 +507,223 @@ pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_i
                 bid.stablecoin_token.clone(),
                 bid.amount,
             ),
+    )
+}
+
+/// Let a buyer walk away from a deal that is already under way, if they do it
+/// inside the window for the stage the deal has reached.
+///
+/// `cancel_bid` only ever covered a `Pending` bid — one the seller hadn't
+/// acted on. Once a bid was accepted the buyer was committed with no way out,
+/// so a deal that stalled (seller goes quiet, agreement never arrives) left
+/// the buyer's funds in escrow indefinitely with only an admin refund to fall
+/// back on.
+///
+/// # Where the exits are, and where they stop
+///
+/// The agreement is the real-world contract the two parties settled on after
+/// their appointments. The seller mints it to the buyer as an NFT, and the
+/// buyer reviews it. That review is the decision point:
+///
+/// - `Accepted` — nothing has been handed over. A clean exit.
+/// - `DocsReleased` — the buyer is holding the agreement and hasn't accepted
+///   it. Rejecting it burns the agreement and refunds them.
+/// - `DocsConfirmed` — **the buyer accepted the agreement. There is no exit.**
+///   Deliberately has no cancellation entrypoint: accepting is the commitment,
+///   and the only ways out after it are paying or raising a dispute.
+///
+/// # Why the agreement is burned on the way out
+///
+/// A buyer who walks away must not keep the agreement. Otherwise a seller
+/// hands over the signed terms, the buyer cancels, and leaves holding a
+/// document they never paid for. Burning it is what makes releasing documents
+/// safe for the seller, so it is not optional — if the bid has a document, it
+/// goes.
+///
+/// The window runs from `bid.updated_at`, which is set on every status
+/// transition and so marks when the bid entered its current stage. It bounds
+/// the seller's exposure in the other direction too: after it closes, the
+/// buyer is committed and the seller isn't left waiting indefinitely.
+///
+/// The refund is the same optimistic pattern the rest of the contract uses:
+/// decrement the tracked balance, transfer, and let
+/// `refund_pending_bid_callback` put it back if the transfer fails.
+fn internal_buyer_cancel_staged(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+    expected_status: BidStatus,
+    window_ns: u64,
+    stage: &str,
+) -> Promise {
+    let bid = {
+        let bids: &Vec<Bid> = contract.bids.get(&property_id).expect("Bid does not exist");
+        get_bid_from_list(bids, bid_id)
+    };
+
+    require!(
+        bid.property_id == property_id,
+        "Bid is not for the specified property"
+    );
+
+    require!(
+        bid.bidder == env::predecessor_account_id(),
+        "Only the bidder can cancel their own bid"
+    );
+
+    // Naming the actual status matters: a buyer hitting this is often racing
+    // the seller's next action, and "expected Accepted, found DocsReleased"
+    // tells them to use the next stage's call instead of just that it failed.
+    require!(
+        bid.status == expected_status,
+        format!(
+            "Cannot cancel at the '{}' stage: this bid is {:?}, not {:?}",
+            stage, bid.status, expected_status
+        )
+    );
+
+    let now = env::block_timestamp();
+    let deadline = checked_add_u64(bid.updated_at, window_ns, "cancellation deadline");
+    require!(
+        now <= deadline,
+        format!(
+            "The window to cancel at the '{}' stage closed {} seconds ago. \
+             The deal can now only be unwound by raising a dispute.",
+            stage,
+            now.saturating_sub(deadline) / 1_000_000_000
+        )
+    );
+    let window_remaining_ns = deadline.saturating_sub(now);
+
+    let refund_promise = ft_contract::ext(bid.stablecoin_token.clone())
+        .with_attached_deposit(NearToken::from_yoctonear(1))
+        .with_static_gas(Gas::from_tgas(30))
+        .ft_transfer(bid.bidder.clone(), U128(bid.amount));
+
+    let current_balance = *contract
+        .stable_coin_balances
+        .get(&bid.stablecoin_token)
+        .unwrap_or(&0);
+    contract.stable_coin_balances.insert(
+        bid.stablecoin_token.clone(),
+        checked_sub_u128(current_balance, bid.amount, "staged cancel refund"),
+    );
+
+    let previous_status = format!("{:?}", bid.status);
+
+    // Burn the agreement before anything else can fail. A buyer who walks away
+    // must not keep the terms the seller handed over — otherwise the seller
+    // has given a signed agreement to someone who never paid for the property.
+    //
+    // `burn_nft` checks the signer owns the token, which holds here: the
+    // document was transferred to the bidder on release, and the bidder is the
+    // caller. It also asserts one yocto, covered by these being #[payable]
+    // entrypoints the buyer attaches to.
+    if let Some(document_token_id) = bid.document_token_id.clone() {
+        burn_nft(contract, document_token_id.clone());
+        log!(
+            "Burned agreement {} — buyer {} rejected it and cancelled",
+            document_token_id,
+            bid.bidder
+        );
+    }
+
+    if let Some(bids) = contract.bids.get_mut(&property_id) {
+        let _ = update_bid_in_list(bids, bid_id, |b| {
+            b.status = BidStatus::Cancelled;
+            b.updated_at = now;
+            // The agreement no longer exists, so the bid must stop pointing at
+            // it — a dangling id here would let a later read think documents
+            // were still outstanding.
+            b.document_token_id = None;
+        });
+    }
+
+    // The seller put the property aside for this buyer when they accepted, so
+    // unwinding the deal has to hand it back rather than leave it in limbo.
+    if let Some(property) = contract.properties.get_mut(&property_id) {
+        property.is_for_sale = true;
+    }
+
+    emit_event(
+        "BidCancelledByBuyer",
+        BidCancelledByBuyerEvent {
+            token_id: property_id,
+            bid_id,
+            bidder_id: bid.bidder.clone(),
+            amount: bid.amount,
+            stage: stage.to_string(),
+            previous_status,
+            window_remaining_ns,
+        },
+    );
+
+    log!(
+        "Bid {} on property {} cancelled by buyer {} at stage '{}'",
+        bid_id,
+        property_id,
+        bid.bidder,
+        stage
+    );
+
+    refund_promise.then(
+        crate::ShedaContract::ext(env::current_account_id())
+            .with_static_gas(Gas::from_tgas(20))
+            .refund_pending_bid_callback(
+                property_id,
+                bid_id,
+                bid.stablecoin_token.clone(),
+                bid.amount,
+            ),
+    )
+}
+
+/// Stage 1 — the seller accepted, nothing has been handed over yet.
+pub fn internal_buyer_cancel_accepted_bid(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+) -> Promise {
+    // Stage 1 of the escrow flow. `path_a_cancellation_window_ns` is not used
+    // here: path A is the direct, non-escrow acceptance, which settles inside
+    // the same transaction and so never rests in `Accepted` for anyone to
+    // cancel from.
+    let window = contract.path_b_stage1_window_ns;
+    internal_buyer_cancel_staged(
+        contract,
+        property_id,
+        bid_id,
+        BidStatus::Accepted,
+        window,
+        "accepted",
+    )
+}
+
+/// Stage 2 — the buyer has the agreement and is rejecting it.
+///
+/// The seller minted the terms they settled on in the real world to the buyer
+/// as an NFT. If the buyer won't accept those terms, the agreement is burned
+/// and their escrow is returned. Confirming instead is the commitment, and
+/// there is no cancellation past it.
+///
+/// There is deliberately **no** equivalent for `DocsConfirmed`. Once the buyer
+/// has accepted the agreement the only routes are releasing payment or raising
+/// a dispute — adding an exit there would let a buyer accept the terms and
+/// then walk, which is exactly what the seller is relying on not happening
+/// when they hand the document over.
+pub fn internal_buyer_reject_documents_and_cancel(
+    contract: &mut ShedaContract,
+    property_id: u64,
+    bid_id: u64,
+) -> Promise {
+    let window = contract.path_b_stage2_window_ns;
+    internal_buyer_cancel_staged(
+        contract,
+        property_id,
+        bid_id,
+        BidStatus::DocsReleased,
+        window,
+        "documents_rejected",
     )
 }
 

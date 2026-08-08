@@ -39,7 +39,6 @@ async fn disputed_bid(fx: &common::Fixture, property_id: u64) -> common::TestRes
             "property_id": property_id,
             "reason": "Seller stopped responding after the viewing",
         }))
-        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?

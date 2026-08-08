@@ -12,12 +12,20 @@
 //! `ft_metadata` must return. The supply is handed to one account at
 //! construction and moved around from there.
 
+// The impl_fungible_token_* macros expand to trait impls written in terms of
+// these types, so they all have to be in scope at the expansion site even
+// though nothing below names them directly.
+use near_contract_standards::fungible_token::core::FungibleTokenCore;
 use near_contract_standards::fungible_token::metadata::{
     FungibleTokenMetadata, FungibleTokenMetadataProvider, FT_METADATA_SPEC,
 };
+use near_contract_standards::fungible_token::resolver::FungibleTokenResolver;
 use near_contract_standards::fungible_token::FungibleToken;
+use near_contract_standards::storage_management::{
+    StorageBalance, StorageBalanceBounds, StorageManagement,
+};
 use near_sdk::json_types::U128;
-use near_sdk::{near, AccountId, PanicOnDefault};
+use near_sdk::{near, AccountId, NearToken, PanicOnDefault, PromiseOrValue};
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]

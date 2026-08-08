@@ -40,6 +40,25 @@ pub type TokenId = String;
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
+const NS_PER_HOUR: u64 = 60 * 60 * 1_000_000_000;
+
+/// Defaults for the buyer-cancellation windows.
+pub const DEFAULT_PATH_A_CANCELLATION_WINDOW_NS: u64 = NS_PER_HOUR;
+pub const DEFAULT_PATH_B_STAGE1_WINDOW_NS: u64 = 24 * NS_PER_HOUR;
+pub const DEFAULT_PATH_B_STAGE2_WINDOW_NS: u64 = 48 * NS_PER_HOUR;
+pub const DEFAULT_PATH_B_STAGE3_WINDOW_NS: u64 = 24 * NS_PER_HOUR;
+pub const DEFAULT_DISPUTE_RESOLUTION_TIMELOCK_NS: u64 = 72 * NS_PER_HOUR;
+pub const DEFAULT_LEASE_EARLY_TERMINATION_WINDOW_NS: u64 = 7 * 24 * NS_PER_HOUR;
+
+/// Storage prefix for the bids map rebuilt by the v4 migration.
+///
+/// Deliberately *not* the original `b"b"`. `IterableMap` keeps its entries in
+/// separate storage keys under its prefix, so reusing `b"b"` would leave the
+/// undeserializable v2-era entries sitting at the exact keys the fresh map
+/// writes to — a new map with a stale backing store, which is how this state
+/// got corrupted in the first place. A new prefix guarantees a clean slate.
+const BIDS_V4_PREFIX: &[u8] = b"b4";
+
 pub struct ShedaContract {
     pub tokens: NonFungibleToken,
     pub metadata: LazyOption<NFTContractMetadata>,
@@ -68,6 +87,18 @@ pub struct ShedaContract {
     pub bid_expiry_ns: u64,
     pub escrow_release_delay_ns: u64,
     pub lost_bid_claim_delay_ns: u64,
+
+    // Buyer-cancellation windows. How long a buyer has to walk away at each
+    // stage of a deal, and how long an admin has to settle a contested one.
+    // Configurable via `set_cancellation_windows` so they can be tuned without
+    // a redeploy. A zero value means "unset" and callers fall back to the
+    // defaults in `default_cancellation_windows`.
+    pub path_a_cancellation_window_ns: u64,
+    pub path_b_stage1_window_ns: u64,
+    pub path_b_stage2_window_ns: u64,
+    pub path_b_stage3_window_ns: u64,
+    pub dispute_resolution_timelock_ns: u64,
+    pub lease_early_termination_window_ns: u64,
 
     // Global contract factory
     pub global_contract_code: Option<Vec<u8>>,
@@ -357,6 +388,12 @@ impl ShedaContract {
             bid_expiry_ns: 7 * 24 * 60 * 60 * 1_000_000_000,
             escrow_release_delay_ns: 24 * 60 * 60 * 1_000_000_000,
             lost_bid_claim_delay_ns: 24 * 60 * 60 * 1_000_000_000,
+            path_a_cancellation_window_ns: DEFAULT_PATH_A_CANCELLATION_WINDOW_NS,
+            path_b_stage1_window_ns: DEFAULT_PATH_B_STAGE1_WINDOW_NS,
+            path_b_stage2_window_ns: DEFAULT_PATH_B_STAGE2_WINDOW_NS,
+            path_b_stage3_window_ns: DEFAULT_PATH_B_STAGE3_WINDOW_NS,
+            dispute_resolution_timelock_ns: DEFAULT_DISPUTE_RESOLUTION_TIMELOCK_NS,
+            lease_early_termination_window_ns: DEFAULT_LEASE_EARLY_TERMINATION_WINDOW_NS,
             global_contract_code: None,
             property_instances: IterableMap::new(b"pi".to_vec()),
             oracle_account_id: Some(owner_id.clone()),
@@ -364,7 +401,7 @@ impl ShedaContract {
             upgrade_delay_ns: 0,
             pending_upgrade_code: None,
             pending_upgrade_at: None,
-            version: 3,
+            version: 4,
         };
         this.admins.insert(owner_id);
         for stablecoin in supported_stablecoins {
@@ -374,17 +411,44 @@ impl ShedaContract {
         this
     }
 
-    /// Upgrade hook to migrate state from a previous version.
+    /// Upgrade hook to migrate state to v4.
+    ///
+    /// v4 adds the buyer-cancellation window fields and starts the bids map
+    /// clean under a new storage prefix.
+    ///
+    /// # Why bids reset instead of carrying over
+    ///
+    /// The previous `migrate()` could never run. It iterated `old.bids`, and
+    /// `IterableMap::iter()` deserializes each value eagerly — so it panicked
+    /// with `Cannot deserialize element` on the first record written before
+    /// `Bid` gained `document_image_uri`/`document_description`. Borsh is
+    /// positional, so those bytes can't be read as the current `Bid`. The
+    /// migration meant to repair the corruption was blocked by the corruption.
+    ///
+    /// Any migration that tries to preserve those records has to decide, per
+    /// entry, whether it is readable — and guessing wrong destroys live bids
+    /// and the escrow behind them. On testnet, where the existing records are
+    /// already written off, that risk buys nothing. So this reads none of them:
+    /// it never touches `old.bids` at all, which is the only approach that
+    /// cannot hit the panic. Bidders re-bid against a contract that works.
+    ///
+    /// # This abandons escrow
+    ///
+    /// Dropped bids leave their stablecoins in the contract with no record to
+    /// refund against. `stable_coin_balances` still counts them, so the owner
+    /// can recover them via `emergency_withdraw`, but bidders can't be paid out
+    /// through the normal path. Reconcile those balances after migrating.
     #[init(ignore_state)]
     #[private]
     pub fn migrate() -> Self {
-        // Read old state as a temporary struct containing OldBid entries
+        // Mirrors the v3 layout exactly: current `Bid`, and none of the
+        // cancellation-window fields v4 introduces.
         #[derive(BorshDeserialize)]
-        struct OldStateV2 {
+        struct OldStateV3 {
             pub tokens: NonFungibleToken,
             pub metadata: LazyOption<NFTContractMetadata>,
             pub properties: IterableMap<u64, Property>,
-            pub bids: IterableMap<u64, Vec<OldBid>>,
+            pub bids: IterableMap<u64, Vec<Bid>>,
             pub leases: IterableMap<u64, Lease>,
             pub property_counter: u64,
             pub bid_counter: u64,
@@ -410,40 +474,14 @@ impl ShedaContract {
             pub version: u32,
         }
 
-        let old: OldStateV2 = env::state_read().expect("Old state does not exist");
+        let old: OldStateV3 = env::state_read().expect("Old state does not exist");
 
-        // Transform OldBid entries to new Bid with document fields
-        let mut migrated_bids = IterableMap::new(b"b".to_vec());
-        for (property_id, old_bids) in old.bids.iter() {
-            let new_bids: Vec<Bid> = old_bids
-                .iter()
-                .map(|old_bid| Bid {
-                    id: old_bid.id,
-                    bidder: old_bid.bidder.clone(),
-                    property_id: old_bid.property_id,
-                    amount: old_bid.amount,
-                    created_at: old_bid.created_at,
-                    updated_at: old_bid.updated_at,
-                    status: old_bid.status.clone(),
-                    document_token_id: old_bid.document_token_id.clone(),
-                    document_image_uri: None,
-                    document_description: None,
-                    escrow_release_tx: old_bid.escrow_release_tx.clone(),
-                    dispute_reason: old_bid.dispute_reason.clone(),
-                    expires_at: old_bid.expires_at,
-                    escrow_release_after: old_bid.escrow_release_after,
-                    action: old_bid.action.clone(),
-                    stablecoin_token: old_bid.stablecoin_token.clone(),
-                    // Pre-upgrade bids never tracked this; a bid already
-                    // tied to a lease before this migration just falls back
-                    // to the client's estimate path instead of the precise
-                    // get_lease_by_id lookup — no regression, just no gain
-                    // for that narrow pre-existing set.
-                    lease_id: None,
-                })
-                .collect();
-            migrated_bids.insert(*property_id, new_bids);
-        }
+        // `old.bids` is never read — not iterated, not cleared. Reading it is
+        // the operation that panics, and `IterableMap::clear()` walks entries
+        // to drop them, so even discarding it properly would hit the same
+        // failure. It stays in storage, unreferenced, at the old prefix.
+        let migrated_bids = IterableMap::new(BIDS_V4_PREFIX.to_vec());
+        log!("migrate v4: bids reset under a new storage prefix");
 
         let mut bid_expiry_ns = old.bid_expiry_ns;
         if bid_expiry_ns == 0 {
@@ -480,6 +518,13 @@ impl ShedaContract {
             bid_expiry_ns,
             escrow_release_delay_ns,
             lost_bid_claim_delay_ns,
+            // New in v4 — no prior value to carry over.
+            path_a_cancellation_window_ns: DEFAULT_PATH_A_CANCELLATION_WINDOW_NS,
+            path_b_stage1_window_ns: DEFAULT_PATH_B_STAGE1_WINDOW_NS,
+            path_b_stage2_window_ns: DEFAULT_PATH_B_STAGE2_WINDOW_NS,
+            path_b_stage3_window_ns: DEFAULT_PATH_B_STAGE3_WINDOW_NS,
+            dispute_resolution_timelock_ns: DEFAULT_DISPUTE_RESOLUTION_TIMELOCK_NS,
+            lease_early_termination_window_ns: DEFAULT_LEASE_EARLY_TERMINATION_WINDOW_NS,
             global_contract_code: old.global_contract_code,
             property_instances: old.property_instances,
             oracle_account_id: old.oracle_account_id,
@@ -487,7 +532,7 @@ impl ShedaContract {
             upgrade_delay_ns: old.upgrade_delay_ns,
             pending_upgrade_code: old.pending_upgrade_code,
             pending_upgrade_at: old.pending_upgrade_at,
-            version: 3,
+            version: 4,
         }
     }
 

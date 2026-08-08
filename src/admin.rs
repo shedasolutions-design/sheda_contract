@@ -206,6 +206,68 @@ impl ShedaContract {
         self.leases.insert(lease_id, lease);
     }
 
+    /// Tune the buyer-cancellation windows without a redeploy.
+    ///
+    /// Each argument is optional; `None` leaves that window unchanged. A zero
+    /// is rejected rather than stored — a zero-length window would let a buyer
+    /// cancel at any point with no time bound, which is the opposite of what
+    /// these gates are for.
+    #[payable]
+    pub fn set_cancellation_windows(
+        &mut self,
+        path_a_ns: Option<u64>,
+        path_b_stage1_ns: Option<u64>,
+        path_b_stage2_ns: Option<u64>,
+        path_b_stage3_ns: Option<u64>,
+        dispute_timelock_ns: Option<u64>,
+        lease_early_termination_ns: Option<u64>,
+    ) {
+        self.assert_owner();
+
+        let apply = |value: Option<u64>, target: &mut u64, label: &str| {
+            if let Some(v) = value {
+                require!(v > 0, format!("{} must be greater than zero", label));
+                *target = v;
+            }
+        };
+
+        apply(
+            path_a_ns,
+            &mut self.path_a_cancellation_window_ns,
+            "path_a_ns",
+        );
+        apply(
+            path_b_stage1_ns,
+            &mut self.path_b_stage1_window_ns,
+            "path_b_stage1_ns",
+        );
+        apply(
+            path_b_stage2_ns,
+            &mut self.path_b_stage2_window_ns,
+            "path_b_stage2_ns",
+        );
+        apply(
+            path_b_stage3_ns,
+            &mut self.path_b_stage3_window_ns,
+            "path_b_stage3_ns",
+        );
+        apply(
+            dispute_timelock_ns,
+            &mut self.dispute_resolution_timelock_ns,
+            "dispute_timelock_ns",
+        );
+        apply(
+            lease_early_termination_ns,
+            &mut self.lease_early_termination_window_ns,
+            "lease_early_termination_ns",
+        );
+
+        log!(
+            "Cancellation windows updated by owner {}",
+            env::signer_account_id()
+        );
+    }
+
     #[payable]
     pub fn set_oracle_account(&mut self, oracle_account: AccountId) {
         self.assert_owner();

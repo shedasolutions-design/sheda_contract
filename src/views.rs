@@ -312,6 +312,29 @@ impl ShedaContract {
         )
     }
 
+    /// Contract state version.
+    ///
+    /// There was no way to ask a deployed contract which state layout it had,
+    /// so confirming whether a migration had run meant probing view methods
+    /// until one panicked. Given Borsh layout drift has corrupted this
+    /// contract's state before, that answer should be one call away.
+    pub fn get_version(&self) -> u32 {
+        self.version
+    }
+
+    /// The six buyer-cancellation windows, in nanoseconds, in the order:
+    /// path A, path B stages 1-3, dispute timelock, lease early termination.
+    pub fn get_cancellation_windows(&self) -> [u64; 6] {
+        [
+            self.path_a_cancellation_window_ns,
+            self.path_b_stage1_window_ns,
+            self.path_b_stage2_window_ns,
+            self.path_b_stage3_window_ns,
+            self.dispute_resolution_timelock_ns,
+            self.lease_early_termination_window_ns,
+        ]
+    }
+
     pub fn get_upgrade_status(&self) -> (Option<u64>, u64) {
         (self.pending_upgrade_at, self.upgrade_delay_ns)
     }

@@ -2,12 +2,22 @@ name: Deploy to production
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_migration:
+        description: >-
+          Run migrate() as an init call during this deploy. Required whenever
+          the deployed commit changes the ShedaContract struct — Borsh is
+          positional, so without it the contract cannot deserialize its own
+          state and every method panics.
+        type: boolean
+        default: false
 
 jobs:
   test:
     uses: ./.github/workflows/test.yml
 
-  deploy-staging:
+  deploy-production:
     name: Deploy to production
     needs: [test]
     runs-on: ubuntu-latest
@@ -16,10 +26,46 @@ jobs:
         uses: actions/checkout@v4
       - name: Install cargo-near CLI
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.17.0/cargo-near-installer.sh | sh
-      - name: Deploy to production
+
+      # Deploying code alone is only safe while the state layout is unchanged.
+      # A struct change needs the migration in the same deploy, so the two
+      # paths are split rather than defaulted, and the migrating one has to be
+      # asked for explicitly via workflow_dispatch.
+      - name: Deploy (no migration)
+        if: ${{ github.event_name == 'push' || inputs.run_migration != true }}
         run: |
           cargo near deploy build-reproducible-wasm "${{ vars.NEAR_CONTRACT_PRODUCTION_ACCOUNT_ID }}" \
             without-init-call \
             network-config "${{ vars.NEAR_CONTRACT_PRODUCTION_NETWORK }}" \
             sign-with-plaintext-private-key "${{ secrets.NEAR_CONTRACT_PRODUCTION_ACCOUNT_PRIVATE_KEY }}" \
             send
+
+      - name: Deploy with migrate()
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_migration == true }}
+        run: |
+          cargo near deploy build-reproducible-wasm "${{ vars.NEAR_CONTRACT_PRODUCTION_ACCOUNT_ID }}" \
+            with-init-call migrate \
+            json-args '{}' \
+            prepaid-gas '300.0 Tgas' \
+            attached-deposit '0 NEAR' \
+            network-config "${{ vars.NEAR_CONTRACT_PRODUCTION_NETWORK }}" \
+            sign-with-plaintext-private-key "${{ secrets.NEAR_CONTRACT_PRODUCTION_ACCOUNT_PRIVATE_KEY }}" \
+            send
+
+      # A deploy that leaves the contract unable to read its own state is the
+      # failure mode this repo has already hit twice, and it is silent until a
+      # user hits it. get_version is a plain view over the state struct, so it
+      # only answers if deserialization works end to end.
+      - name: Verify contract state is readable
+        run: |
+          RESPONSE=$(curl -sS -X POST "https://rpc.${{ vars.NEAR_CONTRACT_PRODUCTION_NETWORK }}.near.org" \
+            -H 'Content-Type: application/json' \
+            -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"query\",\"params\":{
+                  \"request_type\":\"call_function\",\"finality\":\"final\",
+                  \"account_id\":\"${{ vars.NEAR_CONTRACT_PRODUCTION_ACCOUNT_ID }}\",
+                  \"method_name\":\"get_version\",\"args_base64\":\"e30=\"}}")
+          echo "$RESPONSE"
+          if echo "$RESPONSE" | grep -q '"error"'; then
+            echo "::error::Contract state is not readable after deploy. If this commit changed the ShedaContract struct, re-run this workflow with run_migration=true."
+            exit 1
+          fi

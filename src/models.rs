@@ -133,6 +133,33 @@ pub enum Action {
     Lease,
 }
 
+/// How an admin settles a bid stuck in `Disputed`.
+///
+/// Raising a dispute freezes the bid, and until now nothing could move it out
+/// again — the buyer's escrow stayed locked in the contract permanently, with
+/// no refund and no payout. These are the three ways out.
+#[derive(
+    BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone, PartialEq, Debug, JsonSchema,
+)]
+#[serde(crate = "near_sdk::serde")]
+pub enum DisputeResolution {
+    /// The seller didn't deliver. Refund the buyer in full and unwind the
+    /// deal; the property stays with the seller.
+    BuyerWins,
+    /// The seller did deliver and the buyer is refusing to release payment.
+    ///
+    /// This returns the bid to `DocsConfirmed` rather than paying anyone
+    /// directly, so the deal completes through the ordinary release path —
+    /// which is what knows to transfer ownership on a purchase and to open the
+    /// lease on a rental. Settling that here would mean a second copy of the
+    /// hardest logic in the contract, reachable only by admins and exercised
+    /// only in disputes.
+    SellerWins,
+    /// Neither side is clearly at fault. Split the escrow evenly and unwind;
+    /// an odd unit goes to the buyer, since it is their money at rest.
+    Split,
+}
+
 #[derive(BorshDeserialize, BorshSerialize, Deserialize, Serialize, Clone)]
 pub struct Lease {
     pub id: u64,

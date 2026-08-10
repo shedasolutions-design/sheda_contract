@@ -49,6 +49,26 @@ pub struct BidCancelledEvent {
     pub amount: u128,
 }
 
+/// Event emitted when a buyer walks away from a deal that was already under
+/// way, at one of the time-gated stages after acceptance.
+///
+/// Distinct from `BidCancelled`, which only covers a bid the seller had not
+/// acted on yet. This one means an agreed deal was unwound, so indexers and
+/// the seller's activity feed need to tell the two apart.
+#[derive(Serialize, Deserialize)]
+pub struct BidCancelledByBuyerEvent {
+    pub token_id: u64,
+    pub bid_id: u64,
+    pub bidder_id: AccountId,
+    pub amount: u128,
+    /// Which cancellation gate was used, e.g. "accepted", "docs_released".
+    pub stage: String,
+    /// Bid status immediately before the cancellation.
+    pub previous_status: String,
+    /// Nanoseconds remaining in the window when the buyer cancelled.
+    pub window_remaining_ns: u64,
+}
+
 /// Event emitted when a bid is refunded
 #[derive(Serialize, Deserialize)]
 pub struct BidRefundedEvent {
@@ -165,4 +185,21 @@ pub fn emit_event<T: Serialize>(event_type: &str, event: T) {
         event_type,
         near_sdk::serde_json::to_string(&event).unwrap_or_default()
     );
+}
+
+/// Emitted when an admin settles a bid that was stuck in `Disputed`.
+///
+/// Raising a dispute freezes the buyer's escrow, so how it was released — and
+/// to whom — is the part anyone auditing the deal afterwards needs.
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "near_sdk::serde")]
+pub struct BidDisputeResolvedEvent {
+    pub token_id: u64,
+    pub bid_id: u64,
+    pub admin_id: AccountId,
+    pub resolution: String,
+    pub buyer_id: AccountId,
+    pub seller_id: AccountId,
+    pub buyer_refund: u128,
+    pub seller_payout: u128,
 }

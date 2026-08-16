@@ -55,8 +55,6 @@ jobs:
                   \"account_id\":\"$ACCOUNT\",
                   \"method_name\":\"get_version\",\"args_base64\":\"e30=\"}}")
 
-          # An unreadable contract is already mid-outage: it needs migrate()
-          # just as much as a version bump does.
           if echo "$RESPONSE" | jq -e '(.error != null) or (.result.error != null)' >/dev/null; then
             DEPLOYED="unreadable"
           else
@@ -66,7 +64,21 @@ jobs:
           echo "on-chain version: $DEPLOYED / this commit builds: $CODE_VERSION"
           echo "deployed=$DEPLOYED" >> "$GITHUB_OUTPUT"
           echo "code=$CODE_VERSION" >> "$GITHUB_OUTPUT"
-          if [ "$DEPLOYED" = "$CODE_VERSION" ]; then
+
+          # Block only on a *known* mismatch, where a readable state is behind
+          # the code about to replace it — the #14 trap.
+          #
+          # An unreadable contract is deliberately NOT blocked. It is already
+          # down, so refusing to deploy protects nothing and instead strands
+          # the recovery: shipping fresh code is precisely how that state gets
+          # fixed. The first cut blocked here, and the block then fired on a
+          # contract that was already broken, leaving no way forward through
+          # CI. "Verify contract state is readable" below is what actually
+          # confirms the outcome, and it runs after every path.
+          if [ "$DEPLOYED" = "unreadable" ]; then
+            echo "::warning::$ACCOUNT did not answer get_version, so it is already broken and this deploy cannot regress it. The post-deploy readability check will confirm whether this fixes it; if it still fails, re-run via workflow_dispatch with run_migration=true."
+            echo "required=false" >> "$GITHUB_OUTPUT"
+          elif [ "$DEPLOYED" = "$CODE_VERSION" ]; then
             echo "required=false" >> "$GITHUB_OUTPUT"
           else
             echo "required=true" >> "$GITHUB_OUTPUT"

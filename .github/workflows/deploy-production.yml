@@ -27,12 +27,63 @@ jobs:
       - name: Install cargo-near CLI
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.17.0/cargo-near-installer.sh | sh
 
-      # Deploying code alone is only safe while the state layout is unchanged.
-      # A struct change needs the migration in the same deploy, so the two
-      # paths are split rather than defaulted, and the migrating one has to be
-      # asked for explicitly via workflow_dispatch.
+      # Whether a migration is needed is a fact about the chain, not something
+      # to be remembered. The live contract is asked what version it is running
+      # and that is compared against the version this commit builds. Relying on
+      # a human to tick run_migration is what left production unable to
+      # deserialize its own state for five days after #14: the struct changed,
+      # the push path deployed without migrate(), and the failure was only
+      # visible in a red check nobody re-ran.
+      - name: Determine whether a migration is required
+        id: preflight
+        run: |
+          set -euo pipefail
+          RPC="https://rpc.${{ vars.NEAR_CONTRACT_PRODUCTION_NETWORK }}.near.org"
+          ACCOUNT="${{ vars.NEAR_CONTRACT_PRODUCTION_ACCOUNT_ID }}"
+
+          # Both `version:` literals (new() and migrate()) must agree, or it is
+          # ambiguous what this commit actually builds.
+          CODE_VERSION=$(grep -oP '^\s*version:\s*\K[0-9]+' src/lib.rs | sort -u)
+          if [ "$(printf '%s' "$CODE_VERSION" | grep -c '')" -ne 1 ]; then
+            echo "::error::Conflicting version literals in src/lib.rs: $(echo $CODE_VERSION | tr '\n' ' ')"
+            exit 1
+          fi
+
+          RESPONSE=$(curl -sS -X POST "$RPC" -H 'Content-Type: application/json' \
+            -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"query\",\"params\":{
+                  \"request_type\":\"call_function\",\"finality\":\"final\",
+                  \"account_id\":\"$ACCOUNT\",
+                  \"method_name\":\"get_version\",\"args_base64\":\"e30=\"}}")
+
+          # An unreadable contract is already mid-outage: it needs migrate()
+          # just as much as a version bump does.
+          if echo "$RESPONSE" | jq -e '(.error != null) or (.result.error != null)' >/dev/null; then
+            DEPLOYED="unreadable"
+          else
+            DEPLOYED=$(echo "$RESPONSE" | jq -r '.result.result | implode')
+          fi
+
+          echo "on-chain version: $DEPLOYED / this commit builds: $CODE_VERSION"
+          echo "deployed=$DEPLOYED" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE_VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$DEPLOYED" = "$CODE_VERSION" ]; then
+            echo "required=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "required=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Fails *before* anything reaches the chain, so a struct change can no
+      # longer brick production and report it only afterwards.
+      - name: Block a deploy that would brick the contract
+        if: ${{ steps.preflight.outputs.required == 'true' && inputs.run_migration != true }}
+        run: |
+          echo "::error::On-chain state is version '${{ steps.preflight.outputs.deployed }}' but this commit builds version '${{ steps.preflight.outputs.code }}'. Deploying code alone would leave the contract unable to deserialize its own state and every method would panic. Re-run this workflow via workflow_dispatch on this ref with run_migration=true."
+          exit 1
+
+      # Deploying code alone is only safe while the state layout is unchanged,
+      # which the preflight above has now established.
       - name: Deploy (no migration)
-        if: ${{ github.event_name == 'push' || inputs.run_migration != true }}
+        if: ${{ inputs.run_migration != true }}
         run: |
           cargo near deploy build-reproducible-wasm "${{ vars.NEAR_CONTRACT_PRODUCTION_ACCOUNT_ID }}" \
             without-init-call \

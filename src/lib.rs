@@ -397,26 +397,29 @@ impl ShedaContract {
 
         let mut this = Self {
             tokens: NonFungibleToken::new(
-                b"t".to_vec(),
+                b"v2_t".to_vec(),
                 owner_id.clone(),
-                Some(b"m".to_vec()),
-                Some(b"n".to_vec()),
-                Some(b"o".to_vec()),
+                Some(b"v2_tm".to_vec()),
+                Some(b"v2_te".to_vec()),
+                Some(b"v2_ta".to_vec()),
             ),
-            metadata: LazyOption::new(b"m".to_vec(), Some(&NFTContractMetadata::new(media_url))),
-            properties: IterableMap::new(b"p".to_vec()),
-            bids: IterableMap::new(b"b".to_vec()),
-            leases: IterableMap::new(b"l".to_vec()),
+            metadata: LazyOption::new(
+                b"v2_md".to_vec(),
+                Some(&NFTContractMetadata::new(media_url)),
+            ),
+            properties: IterableMap::new(b"v2_p".to_vec()),
+            bids: IterableMap::new(b"v2_b".to_vec()),
+            leases: IterableMap::new(b"v2_l".to_vec()),
             property_counter: 0,
             bid_counter: 0,
             lease_counter: 0,
-            property_per_owner: IterableMap::new(b"po".to_vec()),
-            lease_per_tenant: IterableMap::new(b"lt".to_vec()),
-            admins: IterableSet::new(b"a".to_vec()),
+            property_per_owner: IterableMap::new(b"v2_po".to_vec()),
+            lease_per_tenant: IterableMap::new(b"v2_lt".to_vec()),
+            admins: IterableSet::new(b"v2_a".to_vec()),
             owner_id: owner_id.clone(),
             accepted_stablecoin: supported_stablecoins.clone(),
-            stable_coin_balances: IterableMap::new(b"s".to_vec()),
-            reentrancy_locks: IterableSet::new(b"rl".to_vec()),
+            stable_coin_balances: IterableMap::new(b"v2_s".to_vec()),
+            reentrancy_locks: IterableSet::new(b"v2_rl".to_vec()),
             mock_transfers_enabled: false,
             bid_expiry_ns: 7 * 24 * 60 * 60 * 1_000_000_000,
             escrow_release_delay_ns: 24 * 60 * 60 * 1_000_000_000,
@@ -428,7 +431,7 @@ impl ShedaContract {
             dispute_resolution_timelock_ns: DEFAULT_DISPUTE_RESOLUTION_TIMELOCK_NS,
             lease_early_termination_window_ns: DEFAULT_LEASE_EARLY_TERMINATION_WINDOW_NS,
             global_contract_code: None,
-            property_instances: IterableMap::new(b"pi".to_vec()),
+            property_instances: IterableMap::new(b"v2_pi".to_vec()),
             oracle_account_id: Some(owner_id.clone()),
             oracle_request_nonce: 0,
             upgrade_delay_ns: 0,
@@ -566,6 +569,79 @@ impl ShedaContract {
             pending_upgrade_code: old.pending_upgrade_code,
             pending_upgrade_at: old.pending_upgrade_at,
             version: 4,
+        }
+    }
+
+    /// Emergency full state reset — wipes corrupted state and reinitializes
+    /// the contract from scratch. Uses fresh storage prefixes so orphaned keys
+    /// from the old contract do not collide.
+    ///
+    /// Deploy with:
+    ///   near contract deploy <account> use-file <wasm> \
+    ///     with-init-call force_reset json-args '{"media_url":"...","supported_stablecoins":["..."]}' \
+    ///     prepaid-gas '300 Tgas' attached-deposit '0 NEAR'
+    #[init(ignore_state)]
+    #[private]
+    pub fn force_reset(media_url: String, supported_stablecoins: Vec<AccountId>) -> Self {
+        // Remove the old STATE key so env::state_exists() is clean
+        env::storage_remove(b"STATE");
+
+        let owner_id = env::predecessor_account_id();
+
+        // Use v2-prefixed storage keys to avoid collision with orphaned old data
+        let mut this = Self {
+            tokens: NonFungibleToken::new(
+                b"v2_t".to_vec(),
+                owner_id.clone(),
+                Some(b"v2_tm".to_vec()),
+                Some(b"v2_te".to_vec()),
+                Some(b"v2_ta".to_vec()),
+            ),
+            metadata: LazyOption::new(
+                b"v2_md".to_vec(),
+                Some(&NFTContractMetadata::new(media_url)),
+            ),
+            properties: IterableMap::new(b"v2_p".to_vec()),
+            bids: IterableMap::new(b"v2_b".to_vec()),
+            leases: IterableMap::new(b"v2_l".to_vec()),
+            property_counter: 0,
+            bid_counter: 0,
+            lease_counter: 0,
+            property_per_owner: IterableMap::new(b"v2_po".to_vec()),
+            lease_per_tenant: IterableMap::new(b"v2_lt".to_vec()),
+            admins: IterableSet::new(b"v2_a".to_vec()),
+            owner_id: owner_id.clone(),
+            accepted_stablecoin: supported_stablecoins.clone(),
+            stable_coin_balances: IterableMap::new(b"v2_s".to_vec()),
+            reentrancy_locks: IterableSet::new(b"v2_rl".to_vec()),
+            mock_transfers_enabled: false,
+            bid_expiry_ns: 7 * 24 * 60 * 60 * 1_000_000_000,
+            escrow_release_delay_ns: 24 * 60 * 60 * 1_000_000_000,
+            lost_bid_claim_delay_ns: 24 * 60 * 60 * 1_000_000_000,
+            global_contract_code: None,
+            property_instances: IterableMap::new(b"v2_pi".to_vec()),
+            oracle_account_id: Some(owner_id.clone()),
+            oracle_request_nonce: 0,
+            upgrade_delay_ns: 0,
+            pending_upgrade_code: None,
+            pending_upgrade_at: None,
+            version: 4,
+        };
+        this.admins.insert(owner_id);
+        for stablecoin in supported_stablecoins {
+            this.stable_coin_balances.insert(stablecoin, 0);
+        }
+
+        this
+    }
+
+    /// Batch-remove orphaned storage keys left over from the old contract.
+    /// Call repeatedly with keys obtained from `near view-state` until all
+    /// old prefixes are cleaned up. Only needed to reclaim locked NEAR.
+    #[private]
+    pub fn clean_orphaned_keys(&mut self, keys: Vec<Base64VecU8>) {
+        for key in keys.iter() {
+            env::storage_remove(&key.0);
         }
     }
 

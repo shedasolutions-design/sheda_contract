@@ -1296,8 +1296,16 @@ impl ShedaContract {
 
         let can_claim = match bid.action {
             crate::models::Action::Purchase => {
-                // Can claim if property has been sold to someone else
-                property.sold.is_some() && property.sold.as_ref().unwrap().buyer_id != bid.bidder
+                // Can claim if property has been sold to someone else.
+                //
+                // `sold` is permanent history and the new owner may list the
+                // property again, so the sale alone is not enough: the bid has
+                // to predate it. A bid placed into a later round lost nothing
+                // to that sale and is still live — without this it could be
+                // withdrawn the moment it was placed.
+                property.sold.as_ref().is_some_and(|sold| {
+                    sold.buyer_id != bid.bidder && bid.created_at < sold.sold_at
+                })
             }
             crate::models::Action::Lease => {
                 // Can claim if property has been leased to someone else

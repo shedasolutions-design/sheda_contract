@@ -1256,9 +1256,29 @@ impl ShedaContract {
             .expect("Bid not found")
             .clone();
 
+        // ONLY `Pending`. A `Rejected` bid has already been paid back.
+        //
+        // `internal_reject_bid` refunds the bidder, debits
+        // `stable_coin_balances`, and only then sets the status to `Rejected`.
+        // Accepting `Rejected` here therefore refunded the same bid a second
+        // time: the bidder was paid twice and the contract's stablecoin pool
+        // was debited twice for one deposit.
+        //
+        // The pool is shared across every open deal, so the damage is not
+        // confined to the bid being claimed — it comes out of funds held for
+        // other people. The visible symptom is a later, entirely legitimate
+        // refund panicking with "Underflow in staged cancel refund", which is
+        // the accounting guard noticing the pool can no longer cover what it
+        // owes. That guard was doing its job; this is what it was catching.
+        //
+        // `Pending` is the state this method exists for: a bid nobody ever
+        // actioned, on a property that has since gone to someone else.
         require!(
-            bid.status == BidStatus::Pending || bid.status == BidStatus::Rejected,
-            "Bid is not claimable"
+            bid.status == BidStatus::Pending,
+            match bid.status {
+                BidStatus::Rejected => "This bid was already refunded when it was rejected.",
+                _ => "Bid is not claimable",
+            }
         );
 
         // Only the bidder can claim their own bid

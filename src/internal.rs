@@ -1267,10 +1267,18 @@ pub fn accept_lease_renewal_callback(
                     )),
                     ..Default::default()
                 };
-            contract.tokens.internal_mint(
+            // Same storage problem as the document mint in
+            // `internal_confirm_document_release`, and here it cannot be
+            // solved by charging the caller at all: this runs in a promise
+            // callback, which carries no attached deposit no matter what the
+            // tenant sent to `accept_lease_renewal`. `internal_mint` therefore
+            // panicked with "Must attach N NEAR to cover storage" every time a
+            // landlord accepted a renewal.
+            contract.tokens.internal_mint_with_refund(
                 document_token_id.clone(),
                 owner_id.clone(),
                 Some(token_metadata),
+                None,
             );
             contract.tokens.internal_transfer(
                 &owner_id,
@@ -1438,10 +1446,22 @@ pub fn internal_confirm_document_release(
         ..Default::default()
     };
 
-    contract.tokens.internal_mint(
+    // `internal_mint` bills the *caller* for the new token's storage and
+    // panics ("Must attach N NEAR to cover storage") when they haven't
+    // attached it. `confirm_document_release` never asked for a storage
+    // deposit, so this panicked on every call and the seller could not hand
+    // over the agreement at all — the whole escrow purchase flow dead-ended
+    // here.
+    //
+    // The contract carries the cost instead. Making the seller pay would mean
+    // quoting a deposit that varies with the metadata they typed, and the same
+    // mint runs from `accept_lease_renewal_callback`, where there is no
+    // attached deposit to bill against in the first place.
+    contract.tokens.internal_mint_with_refund(
         document_token_id.clone(),
         property_owner_id.clone(),
         Some(token_metadata),
+        None,
     );
     contract.tokens.internal_transfer(
         &property_owner_id,

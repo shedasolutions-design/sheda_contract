@@ -563,6 +563,7 @@ async fn test_losing_purchase_bid_is_claimable_after_the_sale() -> common::TestR
             "document_image_uri": "https://example.com/agreement.png",
             "document_description": "Sale agreement",
         }))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?
@@ -570,6 +571,7 @@ async fn test_losing_purchase_bid_is_claimable_after_the_sale() -> common::TestR
     winner
         .call(fx.contract.id(), "confirm_document_receipt")
         .args_json(json!({ "bid_id": winning_bid, "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?
@@ -577,6 +579,7 @@ async fn test_losing_purchase_bid_is_claimable_after_the_sale() -> common::TestR
     winner
         .call(fx.contract.id(), "release_escrow")
         .args_json(json!({ "bid_id": winning_bid, "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
         .max_gas()
         .transact()
         .await?

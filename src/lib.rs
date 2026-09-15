@@ -1124,22 +1124,47 @@ impl ShedaContract {
         internal_delete_property(self, property_id);
     }
 
+    // The `#[payable]` markers from here down are not about wanting the money.
+    //
+    // A state-changing method is conventionally called with one yoctoNEAR
+    // attached, because spending a deposit requires a full-access key and so
+    // proves the call was not made by some dapp's limited-access key. Every
+    // client in this project does that on every write. near_sdk rejects a
+    // deposit outright on a method that is not `#[payable]` — "Method X
+    // doesn't accept deposit" — so each of these was unreachable from the app,
+    // no matter what arguments it sent.
+    //
+    // That is what took out the second half of a purchase: the buyer could not
+    // accept the agreement (`confirm_document_receipt`) and could not release
+    // the payment (`release_escrow`), so a deal that got as far as documents
+    // had nowhere left to go.
+
+    #[payable]
     pub fn raise_lease_dispute(&mut self, lease_id: u64) {
         internal_raise_dispute(self, lease_id, "".to_string());
     }
 
+    #[payable]
     pub fn raise_lease_dispute_with_reason(&mut self, lease_id: u64, reason: String) {
         internal_raise_dispute(self, lease_id, reason);
     }
 
+    #[payable]
     pub fn raise_dispute(&mut self, bid_id: u64, property_id: u64, reason: String) -> bool {
         internal::internal_raise_bid_dispute(self, property_id, bid_id, reason)
     }
 
+    #[payable]
     pub fn expire_lease(&mut self, lease_id: u64) {
         internal::internal_expire_lease(self, lease_id);
     }
 
+    /// Payable so the standard one-yoctoNEAR confirmation deposit is accepted.
+    /// Without it near_sdk rejected the call outright ("doesn't accept
+    /// deposit"), which is what every client sends — so between that and the
+    /// storage panic inside the mint, releasing an agreement could not succeed
+    /// from either direction.
+    #[payable]
     pub fn confirm_document_release(
         &mut self,
         bid_id: u64,
@@ -1169,10 +1194,12 @@ impl ShedaContract {
     /// A buyer who does not want to proceed must call
     /// `buyer_reject_documents_and_cancel` instead, which burns the agreement
     /// and refunds them.
+    #[payable]
     pub fn confirm_document_receipt(&mut self, bid_id: u64, property_id: u64) -> bool {
         internal::internal_confirm_document_receipt(self, property_id, bid_id)
     }
 
+    #[payable]
     pub fn release_escrow(&mut self, bid_id: u64, property_id: u64) -> near_sdk::Promise {
         internal::internal_release_escrow(self, property_id, bid_id)
     }
@@ -1182,6 +1209,7 @@ impl ShedaContract {
         internal::release_escrow_callback(self, property_id, bid_id);
     }
 
+    #[payable]
     pub fn complete_transaction(&mut self, bid_id: u64, property_id: u64) -> bool {
         internal::internal_complete_transaction(self, property_id, bid_id)
     }

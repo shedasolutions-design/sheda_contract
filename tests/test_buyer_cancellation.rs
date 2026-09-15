@@ -295,3 +295,364 @@ async fn test_delete_blocked_while_a_bid_holds_escrow() -> common::TestResult {
 
     Ok(())
 }
+
+/// A rejected bid must not be refundable a second time.
+///
+/// A losing bid reaches `Rejected` by two routes, and both pay the bidder back
+/// on the way:
+///
+///   * the seller calls `reject_bid`, or
+///   * the seller accepts someone else's bid, and `finalize_accepted_bid`
+///     sweeps every still-`Pending` bid — refunding each one and marking it
+///     `Rejected`.
+///
+/// Either way the refund has already gone out by the time the status is
+/// written. `claim_lost_bid` used to accept `Pending || Rejected`, so calling
+/// it afterwards paid the same deposit out again and debited
+/// `stable_coin_balances` a second time for a deposit that was only ever
+/// received once.
+///
+/// That pool is shared by every open deal, so the shortfall is not confined to
+/// the bid being claimed — it is taken out of money held for other people. It
+/// surfaces later as an unrelated and entirely legitimate refund panicking
+/// with "Underflow in staged cancel refund": the accounting guard noticing the
+/// pool can no longer cover what it owes. The guard was doing its job.
+///
+/// This is a lease, not a purchase, for a reason. `can_claim` needs the
+/// property to have gone to somebody else, so the lease has to be real and
+/// belong to another tenant — otherwise the claim is turned away by that check
+/// instead and the test would pass even with the bug present. Driving it this
+/// way puts the status guard under genuine load: it is the only thing left
+/// between the bidder and a second payout. It is also the shape the live
+/// contract is in — one active lease alongside a pile of rejected bids.
+///
+/// The purchase side is covered by
+/// `test_losing_purchase_bid_is_claimable_after_the_sale`.
+#[tokio::test]
+async fn test_rejected_bid_cannot_be_claimed_twice() -> common::TestResult {
+    let worker = near_workspaces::sandbox().await?;
+    let fx = common::setup(&worker).await?;
+
+    // The 24h claim timelock is not what is under test, and `can_claim` is
+    // measured from the lease start — so drop it and let the claim through to
+    // the status check.
+    fx.contract
+        .call("set_time_lock_config")
+        .args_json(json!({
+            "bid_expiry_ns": 7u64 * 24 * 60 * 60 * 1_000_000_000,
+            "escrow_release_delay_ns": 24u64 * 60 * 60 * 1_000_000_000,
+            "lost_bid_claim_delay_ns": 0u64,
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let property_id = fx.mint_property(false).await?;
+
+    // Two losing bids from the same bidder, one per route to `Rejected`.
+    let rejected_by_seller = fx.place_bid(property_id, false).await?;
+    let rejected_by_sweep = fx.place_bid(property_id, false).await?;
+
+    fx.seller
+        .call(fx.contract.id(), "reject_bid")
+        .args_json(json!({ "bid_id": rejected_by_seller, "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    // The winning tenant. A second account is what makes `can_claim` true:
+    // the lease has to belong to somebody other than the bidder claiming.
+    let tenant = worker
+        .root_account()?
+        .create_subaccount("tenant")
+        .initial_balance(NearToken::from_near(20))
+        .transact()
+        .await?
+        .into_result()?;
+    fx.ft
+        .call("storage_deposit")
+        .args_json(json!({ "account_id": tenant.id() }))
+        .deposit(NearToken::from_millinear(10))
+        .transact()
+        .await?
+        .into_result()?;
+    fx.buyer
+        .call(fx.ft.id(), "ft_transfer")
+        .args_json(json!({
+            "receiver_id": tenant.id(),
+            "amount": common::BID_AMOUNT.to_string(),
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let winning_bid = fx.bid_counter().await?;
+    tenant
+        .call(fx.ft.id(), "ft_transfer_call")
+        .args_json(json!({
+            "receiver_id": fx.contract.id(),
+            "amount": common::BID_AMOUNT.to_string(),
+            "msg": json!({
+                "property_id": property_id,
+                "action": "Lease",
+                "stablecoin_token": fx.ft.id(),
+            }).to_string(),
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    // Accepting the winner starts the lease and sweeps the remaining pending
+    // bid — refunding it and marking it `Rejected`.
+    let accept = fx
+        .seller
+        .call(fx.contract.id(), "accept_bid")
+        .args_json(json!({ "bid_id": winning_bid, "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        accept.is_success(),
+        "{:#?}",
+        accept.into_result().unwrap_err()
+    );
+
+    for bid_id in [rejected_by_seller, rejected_by_sweep] {
+        assert_eq!(
+            fx.bid_status(property_id, bid_id).await?.as_deref(),
+            Some("Rejected"),
+            "bid {bid_id} did not reach Rejected, so the test is not exercising the guard",
+        );
+    }
+
+    // Both refunds have landed by now; nothing below may move this again.
+    let balance_after_refunds = fx.ft_balance(fx.buyer.id()).await?;
+
+    for bid_id in [rejected_by_seller, rejected_by_sweep] {
+        let claim = fx
+            .buyer
+            .call(fx.contract.id(), "claim_lost_bid")
+            .args_json(json!({ "bid_id": bid_id, "property_id": property_id }))
+            .deposit(NearToken::from_yoctonear(1))
+            .max_gas()
+            .transact()
+            .await?;
+
+        assert!(
+            claim.is_failure(),
+            "bid {bid_id} was claimable after being rejected — this pays the bidder twice",
+        );
+        let message = format!("{:?}", claim.into_result().unwrap_err());
+        assert!(
+            message.contains("already refunded"),
+            "bid {bid_id} was refused for the wrong reason: {message}",
+        );
+    }
+
+    assert_eq!(
+        fx.ft_balance(fx.buyer.id()).await?,
+        balance_after_refunds,
+        "a refused claim still moved money",
+    );
+
+    Ok(())
+}
+
+/// A losing *purchase* bid must be reclaimable once the property is sold.
+///
+/// `claim_lost_bid` exists so a bidder can withdraw a deposit that nothing
+/// else will ever refund. For purchases it could not: `can_claim` asks whether
+/// `property.sold` names a different buyer, and `Sold` was never constructed
+/// anywhere in the contract — `transfer_property_ownership` even cleared the
+/// field on its way past. The branch was therefore permanently false and the
+/// deposit permanently stuck.
+///
+/// A leftover `Pending` bid is not hypothetical. Both accept paths sweep the
+/// losing bids only while gas holds out and abandon the rest, and a bid placed
+/// after the winner was accepted — which is what happens here — is never swept
+/// at all. The property still shows as for sale until the handover completes,
+/// so there is nothing stopping someone bidding into a deal that is already
+/// settled.
+#[tokio::test]
+async fn test_losing_purchase_bid_is_claimable_after_the_sale() -> common::TestResult {
+    let worker = near_workspaces::sandbox().await?;
+    let fx = common::setup(&worker).await?;
+
+    // Neither timelock is what is under test.
+    fx.contract
+        .call("set_time_lock_config")
+        .args_json(json!({
+            "bid_expiry_ns": 7u64 * 24 * 60 * 60 * 1_000_000_000,
+            "escrow_release_delay_ns": 0u64,
+            "lost_bid_claim_delay_ns": 0u64,
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let property_id = fx.mint_property(true).await?;
+
+    let winner = worker
+        .root_account()?
+        .create_subaccount("winner")
+        .initial_balance(NearToken::from_near(20))
+        .transact()
+        .await?
+        .into_result()?;
+    fx.ft
+        .call("storage_deposit")
+        .args_json(json!({ "account_id": winner.id() }))
+        .deposit(NearToken::from_millinear(10))
+        .transact()
+        .await?
+        .into_result()?;
+    fx.buyer
+        .call(fx.ft.id(), "ft_transfer")
+        .args_json(json!({
+            "receiver_id": winner.id(),
+            "amount": common::BID_AMOUNT.to_string(),
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let winning_bid = fx.bid_counter().await?;
+    winner
+        .call(fx.ft.id(), "ft_transfer_call")
+        .args_json(json!({
+            "receiver_id": fx.contract.id(),
+            "amount": common::BID_AMOUNT.to_string(),
+            "msg": json!({
+                "property_id": property_id,
+                "action": "Purchase",
+                "stablecoin_token": fx.ft.id(),
+            }).to_string(),
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    fx.seller
+        .call(fx.contract.id(), "accept_bid_with_escrow")
+        .args_json(json!({ "bid_id": winning_bid, "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    // Placed *after* the winner was accepted, so no sweep ever touches it.
+    let losing_bid = fx.place_bid(property_id, true).await?;
+
+    // Drive the sale to completion: agreement out, agreement accepted, escrow
+    // released. The last step is what hands over the property.
+    fx.seller
+        .call(fx.contract.id(), "confirm_document_release")
+        .args_json(json!({
+            "bid_id": winning_bid,
+            "property_id": property_id,
+            "document_image_uri": "https://example.com/agreement.png",
+            "document_description": "Sale agreement",
+        }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    winner
+        .call(fx.contract.id(), "confirm_document_receipt")
+        .args_json(json!({ "bid_id": winning_bid, "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    winner
+        .call(fx.contract.id(), "release_escrow")
+        .args_json(json!({ "bid_id": winning_bid, "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    assert_eq!(
+        fx.property_owner(property_id).await?.as_deref(),
+        Some(winner.id().as_str()),
+        "the sale did not complete, so the claim below would prove nothing",
+    );
+
+    // The sale is now on the record — the thing that was missing.
+    let property = fx
+        .contract
+        .view("get_property_by_id")
+        .args_json(json!({ "property_id": property_id }))
+        .await?
+        .json::<Option<serde_json::Value>>()?
+        .expect("property view");
+    let sold = &property["sold"];
+    assert_eq!(
+        sold["buyer_id"].as_str(),
+        Some(winner.id().as_str()),
+        "sale was not recorded on the property: {sold:?}",
+    );
+    assert_eq!(
+        sold["previous_owner_id"].as_str(),
+        Some(fx.seller.id().as_str()),
+    );
+
+    assert_eq!(
+        fx.bid_status(property_id, losing_bid).await?.as_deref(),
+        Some("Pending"),
+        "the losing bid was swept after all, so nothing here is stranded",
+    );
+
+    let balance_before_claim = fx.ft_balance(fx.buyer.id()).await?;
+
+    let claim = fx
+        .buyer
+        .call(fx.contract.id(), "claim_lost_bid")
+        .args_json(json!({ "bid_id": losing_bid, "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        claim.is_success(),
+        "a losing purchase bid could not be reclaimed: {:#?}",
+        claim.into_result().unwrap_err()
+    );
+
+    assert_eq!(
+        fx.ft_balance(fx.buyer.id()).await?,
+        balance_before_claim + common::BID_AMOUNT,
+        "the claim succeeded but no money came back",
+    );
+    assert_eq!(
+        fx.bid_status(property_id, losing_bid).await?.as_deref(),
+        Some("Cancelled"),
+    );
+
+    // And it is a one-time exit — the guard from the double-refund fix still
+    // stands once the bid is no longer `Pending`.
+    let second = fx
+        .buyer
+        .call(fx.contract.id(), "claim_lost_bid")
+        .args_json(json!({ "bid_id": losing_bid, "property_id": property_id }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(second.is_failure(), "a claimed bid was claimable again");
+
+    Ok(())
+}

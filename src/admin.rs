@@ -562,10 +562,10 @@ impl ShedaContract {
             "Cannot delist property with active bids"
         );
 
-        assert!(
-            property.sold.is_none(),
-            "Cannot delist property that has been sold"
-        );
+        // No `sold.is_none()` guard: `sold` is the current owner's purchase
+        // record, which a re-listed property carries for good. Keeping it
+        // would mean an admin could never delist anything that had changed
+        // hands. The `is_for_sale` assert above is the real precondition.
         property.is_for_sale = false;
         self.properties.insert(property_id, property);
         log!(
@@ -597,7 +597,11 @@ impl ShedaContract {
             "Cannot delete a property with an active lease"
         );
 
-        assert!(property.sold.is_none(), "Cannot delete a sold property");
+        // No `sold.is_none()` guard — it records the current owner's own
+        // purchase, so it would permanently exempt every property that ever
+        // changed hands, which is the opposite of what an admin escape hatch
+        // is for. `assert_no_blocking_bids` below is the guard that protects
+        // anyone with funds riding on this property.
 
         // Was checking only Pending, so an admin could delete a property out
         // from under a bid that was Accepted, DocsReleased, DocsConfirmed,

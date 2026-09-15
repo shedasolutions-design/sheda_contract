@@ -12,7 +12,7 @@ use crate::{
         PropertyDelistedEvent,
     },
     ext::ft_contract,
-    models::{Action, Bid, BidStatus, DisputeResolution},
+    models::{Action, Bid, BidStatus, DisputeResolution, Sold},
     ShedaContract,
 };
 
@@ -446,22 +446,21 @@ pub fn internal_cancel_bid(contract: &mut ShedaContract, property_id: u64, bid_i
         "Bid is not for the specified property"
     );
 
-    //ensure my bid was not accepted yet
-    let property = contract
-        .properties
-        .get(&property_id)
-        .expect("Property does not exist");
-
-    if let Some(sold) = &property.sold {
-        if sold.buyer_id == bid.bidder {
-            env::panic_str("Cannot cancel bid: property already sold to you");
-        }
-    }
-    if let Some(lease) = &property.active_lease {
-        if lease.tenant_id == bid.bidder && lease.active {
-            env::panic_str("Cannot cancel bid: property already leased to you");
-        }
-    }
+    // "Ensure my bid was not accepted yet" is already guaranteed above: both
+    // accept paths stamp the winning bid `Accepted` in the same call, so a bid
+    // that is still `Pending` here is by definition not the one that won.
+    //
+    // There used to be two further checks — refusing to cancel when the
+    // property had been sold or leased *to the caller*. Because the winning
+    // bid can never be `Pending`, those could only ever fire on a *second*,
+    // still-pending bid belonging to whoever won, and for that bid cancelling
+    // is the correct remedy: it is their own deposit, never refunded, and
+    // `claim_lost_bid` will not take it either (`can_claim` requires the
+    // property to have gone to somebody *else*). Together they left a winner's
+    // leftover bid with no way out at all.
+    //
+    // Leftovers are not hypothetical: neither accept path is guaranteed to
+    // sweep every losing bid — both stop refunding once gas runs low.
 
     // Refund stablecoin to bidder
     let refund_promise = ft_contract::ext(bid.stablecoin_token.clone())
@@ -1029,7 +1028,7 @@ fn finalize_accepted_bid(contract: &mut ShedaContract, property_id: u64, bid_id:
                 },
             );
 
-            transfer_property_ownership(contract, property_id, &bid.bidder);
+            transfer_property_ownership(contract, property_id, &bid.bidder, bid.amount);
         }
         Action::Lease => {
             let mut updated_property = property.clone();
@@ -1268,10 +1267,18 @@ pub fn accept_lease_renewal_callback(
                     )),
                     ..Default::default()
                 };
-            contract.tokens.internal_mint(
+            // Same storage problem as the document mint in
+            // `internal_confirm_document_release`, and here it cannot be
+            // solved by charging the caller at all: this runs in a promise
+            // callback, which carries no attached deposit no matter what the
+            // tenant sent to `accept_lease_renewal`. `internal_mint` therefore
+            // panicked with "Must attach N NEAR to cover storage" every time a
+            // landlord accepted a renewal.
+            contract.tokens.internal_mint_with_refund(
                 document_token_id.clone(),
                 owner_id.clone(),
                 Some(token_metadata),
+                None,
             );
             contract.tokens.internal_transfer(
                 &owner_id,
@@ -1439,10 +1446,22 @@ pub fn internal_confirm_document_release(
         ..Default::default()
     };
 
-    contract.tokens.internal_mint(
+    // `internal_mint` bills the *caller* for the new token's storage and
+    // panics ("Must attach N NEAR to cover storage") when they haven't
+    // attached it. `confirm_document_release` never asked for a storage
+    // deposit, so this panicked on every call and the seller could not hand
+    // over the agreement at all — the whole escrow purchase flow dead-ended
+    // here.
+    //
+    // The contract carries the cost instead. Making the seller pay would mean
+    // quoting a deposit that varies with the metadata they typed, and the same
+    // mint runs from `accept_lease_renewal_callback`, where there is no
+    // attached deposit to bill against in the first place.
+    contract.tokens.internal_mint_with_refund(
         document_token_id.clone(),
         property_owner_id.clone(),
         Some(token_metadata),
+        None,
     );
     contract.tokens.internal_transfer(
         &property_owner_id,
@@ -1593,7 +1612,7 @@ pub fn release_escrow_callback(contract: &mut ShedaContract, property_id: u64, b
                     // holds the NFT but the contract still records the seller
                     // as owner, which leaves the property unusable by either
                     // party.
-                    transfer_property_ownership(contract, property_id, &bid.bidder);
+                    transfer_property_ownership(contract, property_id, &bid.bidder, bid.amount);
                 }
                 Action::Lease => {
                     // The Lease record was already created in
@@ -1880,7 +1899,11 @@ pub fn internal_delist_property(contract: &mut ShedaContract, property_id: u64) 
         "Cannot delist a property with an active lease"
     );
 
-    assert!(property.sold.is_none(), "Cannot delist a sold property");
+    // No `sold.is_none()` guard. `sold` records how the *current* owner came
+    // by this property, so it is their own purchase history — not a reason to
+    // stop them taking their listing down. The check was unreachable while
+    // `sold` was never assigned; now that it is, keeping it would newly lock
+    // every bought property into its listing.
 
     // Delisting is less destructive than deleting — the property survives —
     // but it still pulls the listing out from under anyone who has funds in
@@ -1958,27 +1981,34 @@ pub fn assert_no_blocking_bids(contract: &ShedaContract, property_id: u64, actio
 /// of those two were updated alongside it, so the token said the buyer owned
 /// the property while the contract's own records still said the seller did.
 /// That left a purchased property permanently stuck: the seller couldn't act
-/// on it (`delete_property`/`delist_property` both refuse once `sold` is set)
-/// and the buyer couldn't either (they weren't `owner_id`), and it never
+/// on it (`delete_property`/`delist_property` both refused once `sold` was
+/// set) and the buyer couldn't either (they weren't `owner_id`), and it never
 /// appeared in the buyer's portfolio, since `get_property_by_owner` reads
 /// `property_per_owner`.
 ///
-/// The property is left in a clean unlisted state so the new owner can do
-/// whatever they like with it — relist it for sale, put it up for lease, or
-/// transfer it on. `sold` is cleared rather than kept: leaving it set would
-/// re-trip the very guards that froze the property in the first place. The
-/// sale itself is still recorded in the `DealFinalized` event.
+/// The property is left unlisted so the new owner can do whatever they like
+/// with it — relist it for sale, put it up for lease, or transfer it on.
+///
+/// `sold` is kept, as a permanent record of the sale. It used to be cleared
+/// right here, because leaving it set re-tripped those delist/delete guards.
+/// The guards were the actual mistake: `sold` describes how the *current*
+/// owner came by the property, so refusing their own delist or delete on the
+/// strength of it is backwards. They are gone, which lets the record stay —
+/// and it has to stay, because `claim_lost_bid` reads it to decide whether a
+/// losing purchase bid may be withdrawn, and `SoldView` reports it to clients.
+/// Clearing it is what made both of those dead.
 ///
 /// Call this immediately after `tokens.internal_transfer`, so the token and
 /// these records can never drift apart again.
 ///
 /// Purchases only. A lease deliberately leaves `owner_id` alone — the
 /// landlord stays the owner for the duration, and `internal_expire_lease`
-/// hands the token back when it ends.
+/// hands the token back when it ends. `sale_amount` is the winning bid.
 pub fn transfer_property_ownership(
     contract: &mut ShedaContract,
     property_id: u64,
     new_owner: &AccountId,
+    sale_amount: u128,
 ) {
     let mut property = contract
         .properties
@@ -2022,7 +2052,32 @@ pub fn transfer_property_ownership(
         .insert(new_owner.clone(), new_owner_properties);
 
     property.owner_id = new_owner.clone();
-    property.sold = None;
+
+    // Record the sale rather than discarding it.
+    //
+    // `Sold` was declared, exposed through `SoldView`, and read by
+    // `claim_lost_bid` — but never constructed anywhere, and this line used to
+    // clear the field outright. `property.sold` was therefore permanently
+    // `None`, which made the purchase branch of `can_claim` permanently false:
+    // a losing *purchase* bid could never be withdrawn by its owner.
+    //
+    // That is a way to strand real money. Neither accept path is guaranteed to
+    // sweep the losing bids — both stop refunding once gas runs low and leave
+    // the rest `Pending` — and a bid placed after the winner was accepted is
+    // never swept at all. `claim_lost_bid` is the bidder's own way out of
+    // exactly those cases, and for purchases it did not work.
+    //
+    // Kept as permanent history, not cleared when the new owner re-lists: the
+    // client already reads it that way, ranking `is_for_sale` above `sold` so
+    // a re-listed property shows as listed rather than sold forever.
+    property.sold = Some(Sold {
+        property_id,
+        buyer_id: new_owner.clone(),
+        amount: sale_amount,
+        previous_owner_id: previous_owner.clone(),
+        sold_at: env::block_timestamp(),
+    });
+
     property.is_for_sale = false;
     contract.properties.insert(property_id, property);
 }
@@ -2045,7 +2100,11 @@ pub fn internal_delete_property(contract: &mut ShedaContract, property_id: u64) 
         "Cannot delete a property with an active lease"
     );
 
-    assert!(property.sold.is_none(), "Cannot delete a sold property");
+    // No `sold.is_none()` guard — same reasoning as delisting, and the stakes
+    // are higher here: this burns the NFT, so refusing on the buyer's own
+    // purchase record would strand every bought property permanently.
+    // `assert_no_blocking_bids` below is what actually protects anyone with
+    // funds riding on this property.
 
     assert_no_blocking_bids(contract, property_id, "deleted");
 

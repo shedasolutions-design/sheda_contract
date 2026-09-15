@@ -618,6 +618,12 @@ impl ShedaContract {
             bid_expiry_ns: 7 * 24 * 60 * 60 * 1_000_000_000,
             escrow_release_delay_ns: 24 * 60 * 60 * 1_000_000_000,
             lost_bid_claim_delay_ns: 24 * 60 * 60 * 1_000_000_000,
+            path_a_cancellation_window_ns: DEFAULT_PATH_A_CANCELLATION_WINDOW_NS,
+            path_b_stage1_window_ns: DEFAULT_PATH_B_STAGE1_WINDOW_NS,
+            path_b_stage2_window_ns: DEFAULT_PATH_B_STAGE2_WINDOW_NS,
+            stalled_deal_timeout_ns: DEFAULT_STALLED_DEAL_TIMEOUT_NS,
+            dispute_resolution_timelock_ns: DEFAULT_DISPUTE_RESOLUTION_TIMELOCK_NS,
+            lease_early_termination_window_ns: DEFAULT_LEASE_EARLY_TERMINATION_WINDOW_NS,
             global_contract_code: None,
             property_instances: IterableMap::new(b"v2_pi".to_vec()),
             oracle_account_id: Some(owner_id.clone()),
@@ -1118,22 +1124,47 @@ impl ShedaContract {
         internal_delete_property(self, property_id);
     }
 
+    // The `#[payable]` markers from here down are not about wanting the money.
+    //
+    // A state-changing method is conventionally called with one yoctoNEAR
+    // attached, because spending a deposit requires a full-access key and so
+    // proves the call was not made by some dapp's limited-access key. Every
+    // client in this project does that on every write. near_sdk rejects a
+    // deposit outright on a method that is not `#[payable]` — "Method X
+    // doesn't accept deposit" — so each of these was unreachable from the app,
+    // no matter what arguments it sent.
+    //
+    // That is what took out the second half of a purchase: the buyer could not
+    // accept the agreement (`confirm_document_receipt`) and could not release
+    // the payment (`release_escrow`), so a deal that got as far as documents
+    // had nowhere left to go.
+
+    #[payable]
     pub fn raise_lease_dispute(&mut self, lease_id: u64) {
         internal_raise_dispute(self, lease_id, "".to_string());
     }
 
+    #[payable]
     pub fn raise_lease_dispute_with_reason(&mut self, lease_id: u64, reason: String) {
         internal_raise_dispute(self, lease_id, reason);
     }
 
+    #[payable]
     pub fn raise_dispute(&mut self, bid_id: u64, property_id: u64, reason: String) -> bool {
         internal::internal_raise_bid_dispute(self, property_id, bid_id, reason)
     }
 
+    #[payable]
     pub fn expire_lease(&mut self, lease_id: u64) {
         internal::internal_expire_lease(self, lease_id);
     }
 
+    /// Payable so the standard one-yoctoNEAR confirmation deposit is accepted.
+    /// Without it near_sdk rejected the call outright ("doesn't accept
+    /// deposit"), which is what every client sends — so between that and the
+    /// storage panic inside the mint, releasing an agreement could not succeed
+    /// from either direction.
+    #[payable]
     pub fn confirm_document_release(
         &mut self,
         bid_id: u64,
@@ -1163,10 +1194,12 @@ impl ShedaContract {
     /// A buyer who does not want to proceed must call
     /// `buyer_reject_documents_and_cancel` instead, which burns the agreement
     /// and refunds them.
+    #[payable]
     pub fn confirm_document_receipt(&mut self, bid_id: u64, property_id: u64) -> bool {
         internal::internal_confirm_document_receipt(self, property_id, bid_id)
     }
 
+    #[payable]
     pub fn release_escrow(&mut self, bid_id: u64, property_id: u64) -> near_sdk::Promise {
         internal::internal_release_escrow(self, property_id, bid_id)
     }
@@ -1176,6 +1209,7 @@ impl ShedaContract {
         internal::release_escrow_callback(self, property_id, bid_id);
     }
 
+    #[payable]
     pub fn complete_transaction(&mut self, bid_id: u64, property_id: u64) -> bool {
         internal::internal_complete_transaction(self, property_id, bid_id)
     }
@@ -1250,9 +1284,29 @@ impl ShedaContract {
             .expect("Bid not found")
             .clone();
 
+        // ONLY `Pending`. A `Rejected` bid has already been paid back.
+        //
+        // `internal_reject_bid` refunds the bidder, debits
+        // `stable_coin_balances`, and only then sets the status to `Rejected`.
+        // Accepting `Rejected` here therefore refunded the same bid a second
+        // time: the bidder was paid twice and the contract's stablecoin pool
+        // was debited twice for one deposit.
+        //
+        // The pool is shared across every open deal, so the damage is not
+        // confined to the bid being claimed — it comes out of funds held for
+        // other people. The visible symptom is a later, entirely legitimate
+        // refund panicking with "Underflow in staged cancel refund", which is
+        // the accounting guard noticing the pool can no longer cover what it
+        // owes. That guard was doing its job; this is what it was catching.
+        //
+        // `Pending` is the state this method exists for: a bid nobody ever
+        // actioned, on a property that has since gone to someone else.
         require!(
-            bid.status == BidStatus::Pending || bid.status == BidStatus::Rejected,
-            "Bid is not claimable"
+            bid.status == BidStatus::Pending,
+            match bid.status {
+                BidStatus::Rejected => "This bid was already refunded when it was rejected.",
+                _ => "Bid is not claimable",
+            }
         );
 
         // Only the bidder can claim their own bid
@@ -1270,8 +1324,16 @@ impl ShedaContract {
 
         let can_claim = match bid.action {
             crate::models::Action::Purchase => {
-                // Can claim if property has been sold to someone else
-                property.sold.is_some() && property.sold.as_ref().unwrap().buyer_id != bid.bidder
+                // Can claim if property has been sold to someone else.
+                //
+                // `sold` is permanent history and the new owner may list the
+                // property again, so the sale alone is not enough: the bid has
+                // to predate it. A bid placed into a later round lost nothing
+                // to that sale and is still live — without this it could be
+                // withdrawn the moment it was placed.
+                property.sold.as_ref().is_some_and(|sold| {
+                    sold.buyer_id != bid.bidder && bid.created_at < sold.sold_at
+                })
             }
             crate::models::Action::Lease => {
                 // Can claim if property has been leased to someone else

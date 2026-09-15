@@ -267,7 +267,8 @@ async fn test_property_per_owner_index_tracks_minter() -> Result<(), Box<dyn std
 //     nft_token(id).owner_id                     == buyer      (must agree)
 //     get_property_by_owner(buyer)               contains id
 //     get_property_by_owner(seller)              does NOT contain id
-//     get_property_by_id(id).sold                == null       (clean slate)
+//     get_property_by_id(id).sold.buyer_id       == buyer      (sale recorded)
+//     get_property_by_id(id).sold.previous_owner_id == seller
 //     get_property_by_id(id).is_for_sale         == false
 //   and then, proving the buyer really controls it:
 //     buyer calling update_listing(id, ...)      succeeds
